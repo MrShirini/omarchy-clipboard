@@ -57,6 +57,23 @@ Or move it interactively:
 omarchy bar move mrshirini.clipboard --section right
 ```
 
+### 🗑️ Removal & Disabling
+
+```bash
+# Temporarily disable the plugin
+omarchy plugin disable mrshirini.clipboard
+
+# Completely uninstall the plugin
+omarchy plugin remove mrshirini.clipboard --yes
+```
+
+### 📋 Prerequisites & Dependencies
+
+Standard Omarchy utilities (pre-installed by default on Omarchy Linux):
+- `wl-clipboard` (`wl-paste`, `wl-copy`)
+- `jq`
+- `perl`
+
 ---
 
 ## ⌨️ Keyboard Shortcuts
