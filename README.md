@@ -123,8 +123,7 @@ You can customize the plugin by creating `~/.config/omarchy/plugins/mrshirini.cl
 ## 🛠️ Development & Testing
 
 ```bash
-# Clone the repository
-git clone https://github.com/MrShirini/omarchy-clipboard.git ~/Projects/omarchy-clipboard
+# Navigate to the repository directory
 cd ~/Projects/omarchy-clipboard
 
 # Run Node.js unit test suite (33 tests covering history, classifier, fuzzy, settings, sanitize)
