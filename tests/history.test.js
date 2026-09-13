@@ -277,6 +277,9 @@ test("normalizeEntry caps giant text to MAX_ENTRY_TEXT_LENGTH and marks truncate
   const normalizedObj = History.normalizeEntry({ type: "text", text: hugeText });
   assert.equal(normalizedObj.text.length, History.MAX_ENTRY_TEXT_LENGTH);
   assert.equal(normalizedObj.truncated, true);
+
+  const displayRow = History.displayRows([normalizedObj], "", 10);
+  assert.equal(displayRow[0].truncated, true);
 });
 
 test("parseHistoryResult accurately detects and reports corrupt JSON", () => {

@@ -14,7 +14,7 @@ import "Sanitize.js" as Sanitize
 Item {
   id: root
 
-  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
+  property string omarchyPath: Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy"
   property bool opened: false
   property string filterText: ""
   property bool favoritesOnly: false
@@ -26,7 +26,7 @@ Item {
   property bool clearConfirmOpen: false
   property var history: []
 
-  property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mrshirini.clipboard/settings.json"
+  property string settingsPath: (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/omarchy/plugins/mrshirini.clipboard/settings.json"
   property var settings: Settings.DEFAULT_SETTINGS
 
   function loadSettings(raw) {
@@ -49,7 +49,8 @@ Item {
     root.rebuildDisplay()
   }
 
-  property string historyPath: Quickshell.env("HOME") + "/.local/state/omarchy/clipboard-history.json"
+  property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy"
+  property string historyPath: stateDir + "/clipboard-history.json"
   property string captureScript: Qt.resolvedUrl("capture.sh").toString().replace(/^file:\/\//, "")
   // Shares the [menu] surface tokens — themes that style the menu also
   // style the clipboard. Selected-row colors composed in the
@@ -407,7 +408,7 @@ Item {
   // the shell exits, however it exits, so no further lifecycle management.
   Process {
     id: initProc
-    command: ["pkill", "-f", "wl-paste .*--watch .*capture\\.sh"]
+    command: ["sh", "-c", "mkdir -p \"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-images\"; pkill -f 'wl-paste .*--watch .*capture\\.sh' || true"]
     onExited: {
       currentProc.running = true
       textWatchProc.running = true

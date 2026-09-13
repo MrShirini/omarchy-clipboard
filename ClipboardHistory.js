@@ -419,7 +419,9 @@ function cappedEntry(entry) {
 
   // Cut on a line break so a file:// URI never truncates into a bogus path.
   var cut = entry.text.lastIndexOf("\n", displayTextLimit)
-  return { type: "text", text: entry.text.slice(0, cut > 0 ? cut : displayTextLimit) }
+  var capped = Object.assign({}, entry)
+  capped.text = entry.text.slice(0, cut > 0 ? cut : displayTextLimit)
+  return capped
 }
 
 var ClassifyModule = (typeof require !== "undefined") ? require("./Classify.js") : null
@@ -564,6 +566,7 @@ if (typeof module !== "undefined") {
     filePaths: filePaths,
     fileEntryText: fileEntryText,
     fullText: fullText,
+    cappedEntry: cappedEntry,
     displayRows: displayRows
   }
 }
