@@ -1,6 +1,18 @@
 var MAX_ENTRY_TEXT_LENGTH = 64 * 1024 // 64 KiB
 var MAX_TOTAL_HISTORY_BYTES = 1024 * 1024 // 1 MiB
 
+function normalizeTags(tags) {
+  if (!Array.isArray(tags)) return []
+  var result = []
+  for (var i = 0; i < tags.length; i++) {
+    var tag = String(tags[i] || "").trim()
+    if (tag && result.indexOf(tag) < 0) {
+      result.push(tag)
+    }
+  }
+  return result
+}
+
 function normalizeEntry(value) {
   if (typeof value === "string") {
     var trimmed = value.trim()
@@ -33,6 +45,10 @@ function normalizeEntry(value) {
     if (value.mime) entry.mime = String(value.mime)
     if (truncated) entry.truncated = true
     if (isFav) entry.favorite = true
+    if (value.tags) {
+      var tags = normalizeTags(value.tags)
+      if (tags.length > 0) entry.tags = tags
+    }
     return entry
   }
 
@@ -51,6 +67,10 @@ function normalizeEntry(value) {
       if (!isNaN(numBytes) && numBytes > 0) entry.bytes = numBytes
     }
     if (isFav) entry.favorite = true
+    if (value.tags) {
+      var imgTags = normalizeTags(value.tags)
+      if (imgTags.length > 0) entry.tags = imgTags
+    }
     return entry
   }
 
@@ -225,6 +245,80 @@ function clearHistory(history) {
   return values.filter(function(e) { return e && e.favorite === true })
 }
 
+function setEntryTags(history, keyOrIndex, tags) {
+  var list = Array.isArray(history) ? history.slice() : []
+  var cleanTags = normalizeTags(tags)
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i]
+    if (i === keyOrIndex || entryKey(item) === keyOrIndex) {
+      var updated = Object.assign({}, item)
+      if (cleanTags.length > 0) {
+        updated.tags = cleanTags
+      } else {
+        delete updated.tags
+      }
+      list[i] = updated
+      break
+    }
+  }
+  return list
+}
+
+function toggleEntryTag(history, keyOrIndex, tag) {
+  var t = String(tag || "").trim()
+  if (!t) return history
+  var list = Array.isArray(history) ? history.slice() : []
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i]
+    if (i === keyOrIndex || entryKey(item) === keyOrIndex) {
+      var currentTags = Array.isArray(item.tags) ? item.tags.slice() : []
+      var idx = currentTags.indexOf(t)
+      if (idx >= 0) {
+        currentTags.splice(idx, 1)
+      } else {
+        currentTags.push(t)
+      }
+      var updated = Object.assign({}, item)
+      if (currentTags.length > 0) {
+        updated.tags = currentTags
+      } else {
+        delete updated.tags
+      }
+      list[i] = updated
+      break
+    }
+  }
+  return list
+}
+
+function getAllTags(history) {
+  var list = Array.isArray(history) ? history : []
+  var tags = []
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i]
+    if (item && Array.isArray(item.tags)) {
+      for (var j = 0; j < item.tags.length; j++) {
+        var t = item.tags[j]
+        if (t && tags.indexOf(t) < 0) {
+          tags.push(t)
+        }
+      }
+    }
+  }
+  return tags
+}
+
+function suggestedTags(entry, sanitizer) {
+  var sn = sanitizer || SanitizeModule
+  var tags = []
+  if (entry && entry.type === "text" && sn && typeof sn.isSensitive === "function") {
+    if (sn.isSensitive(entry.text)) {
+      tags.push("Tokens")
+    }
+  }
+  return tags
+}
+
 function parseEntryJson(line) {
   var raw = String(line || "").trim()
   if (!raw) return null
@@ -233,8 +327,9 @@ function parseEntryJson(line) {
 
 function searchableText(entry) {
   if (!entry) return ""
-  if (entry.type === "image") return "image screenshot " + String(entry.mime || "") + " " + String(entry.capturedAt || "")
-  return String(entry.text || "") + " " + fileEntryText(entry)
+  var tagPart = (entry.tags && entry.tags.length > 0) ? " " + entry.tags.join(" ") : ""
+  if (entry.type === "image") return "image screenshot " + String(entry.mime || "") + " " + String(entry.capturedAt || "") + tagPart
+  return String(entry.text || "") + " " + fileEntryText(entry) + tagPart
 }
 
 function decodeFileUri(uri) {
@@ -327,7 +422,11 @@ function cappedEntry(entry) {
   return { type: "text", text: entry.text.slice(0, cut > 0 ? cut : displayTextLimit) }
 }
 
-function displayRows(history, query, limit, favoritesOnly) {
+var ClassifyModule = (typeof require !== "undefined") ? require("./Classify.js") : null
+var FuzzyModule = (typeof require !== "undefined") ? require("./Fuzzy.js") : null
+var SanitizeModule = (typeof require !== "undefined") ? require("./Sanitize.js") : null
+
+function displayRows(history, query, limit, favoritesOnly, typeFilter, tagFilterOrClassifier, classifierOrFuzzy, fuzzyMatcher, sanitizerModule) {
   var values = Array.isArray(history) ? history : []
   var needle = String(query || "").trim().toLowerCase()
   var max = limit === undefined || limit === null ? 50 : Number(limit)
@@ -335,33 +434,104 @@ function displayRows(history, query, limit, favoritesOnly) {
   max = Math.max(0, max)
   if (max === 0) return []
 
+  var filterType = String(typeFilter || "all").trim().toLowerCase()
+  var tagFilter = "all"
+  var cls = null
+  var fz = null
+  var sn = sanitizerModule || SanitizeModule
+
+  if (typeof tagFilterOrClassifier === "string") {
+    tagFilter = tagFilterOrClassifier.trim().toLowerCase()
+    cls = classifierOrFuzzy
+    fz = fuzzyMatcher
+  } else {
+    cls = tagFilterOrClassifier
+    fz = classifierOrFuzzy
+  }
+  cls = cls || ClassifyModule
+  fz = fz || FuzzyModule
+
   var rows = []
 
   for (var i = 0; i < values.length; i++) {
     var entry = cappedEntry(normalizeEntry(values[i]))
     if (!entry) continue
     if (favoritesOnly && !entry.favorite) continue
-    if (needle && searchableText(entry).toLowerCase().indexOf(needle) < 0) continue
+
+    if (tagFilter && tagFilter !== "all") {
+      var entryTags = entry.tags || []
+      var matchedTag = false
+      for (var t = 0; t < entryTags.length; t++) {
+        if (entryTags[t].toLowerCase() === tagFilter) {
+          matchedTag = true
+          break
+        }
+      }
+      if (!matchedTag) continue
+    }
 
     var paths = filePaths(entry)
     var isFile = paths.length > 0
+    var entryType = (cls && typeof cls.classifyEntry === "function")
+      ? cls.classifyEntry(entry, isFile)
+      : (isFile ? "file" : entry.type)
+
+    if (filterType && filterType !== "all" && entryType !== filterType) {
+      continue
+    }
+
+    var score = 0
+    if (needle) {
+      var searchStr = searchableText(entry)
+      if (fz && typeof fz.fuzzyMatch === "function") {
+        var matchRes = fz.fuzzyMatch(needle, searchStr)
+        if (!matchRes.match) continue
+        score = matchRes.score
+      } else {
+        if (searchStr.toLowerCase().indexOf(needle) < 0) continue
+      }
+    }
+
     var isImage = entry.type === "image"
     var previewPath = isImage ? String(entry.path || "") : (isFile && paths.length === 1 && isImagePath(paths[0]) ? paths[0] : "")
+    var pText = previewText(entry)
+    var isSens = false
+    var sensType = ""
+    if (!isImage && sn && typeof sn.detectSensitive === "function") {
+      var sInfo = sn.detectSensitive(entry.text || "")
+      if (sInfo) {
+        isSens = true
+        sensType = sInfo.type || "Secret"
+      }
+    }
+
+    var masked = (isSens && sn && typeof sn.maskText === "function") ? sn.maskText(pText) : pText
+
     rows.push({
-      entryType: isFile ? "file" : entry.type,
+      entryType: entryType,
       fullText: isImage ? "" : fullText(entry),
-      previewText: previewText(entry),
+      previewText: pText,
+      maskedPreview: masked,
+      sensitive: isSens,
+      sensitiveType: sensType,
+      tags: entry.tags ? entry.tags.slice() : [],
       previewImage: previewPath,
       path: isImage ? String(entry.path || "") : (isFile && paths.length === 1 ? paths[0] : ""),
       mime: isImage ? String(entry.mime || "image/png") : "text/plain",
       favorite: !!entry.favorite,
       truncated: !!entry.truncated,
+      score: score,
       index: i
     })
-    if (rows.length >= max) break
   }
 
-  return rows
+  if (needle && rows.length > 1) {
+    rows.sort(function(a, b) {
+      return b.score - a.score
+    })
+  }
+
+  return rows.slice(0, max)
 }
 
 if (typeof module !== "undefined") {
@@ -370,6 +540,7 @@ if (typeof module !== "undefined") {
     MAX_TOTAL_HISTORY_BYTES: MAX_TOTAL_HISTORY_BYTES,
     MAX_IMAGE_STORE_BYTES: MAX_IMAGE_STORE_BYTES,
     normalizeEntry: normalizeEntry,
+    normalizeTags: normalizeTags,
     entryKey: entryKey,
     parseHistory: parseHistory,
     parseHistoryResult: parseHistoryResult,
@@ -382,6 +553,10 @@ if (typeof module !== "undefined") {
     removeEntryAt: removeEntryAt,
     clearHistory: clearHistory,
     toggleFavorite: toggleFavorite,
+    setEntryTags: setEntryTags,
+    toggleEntryTag: toggleEntryTag,
+    getAllTags: getAllTags,
+    suggestedTags: suggestedTags,
     parseEntryJson: parseEntryJson,
     searchableText: searchableText,
     previewText: previewText,
@@ -392,3 +567,4 @@ if (typeof module !== "undefined") {
     displayRows: displayRows
   }
 }
+

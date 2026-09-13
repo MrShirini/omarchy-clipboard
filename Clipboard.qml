@@ -6,6 +6,10 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 import "ClipboardHistory.js" as ClipboardHistory
+import "Classify.js" as Classify
+import "Fuzzy.js" as Fuzzy
+import "Settings.js" as Settings
+import "Sanitize.js" as Sanitize
 
 Item {
   id: root
@@ -14,10 +18,36 @@ Item {
   property bool opened: false
   property string filterText: ""
   property bool favoritesOnly: false
+  property string activeTypeFilter: "all"
+  property string activeTagFilter: "all"
+  property var revealedItems: ({})
   property int selectedIndex: 0
   property bool cursorActive: false
   property bool clearConfirmOpen: false
   property var history: []
+
+  property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/mrshirini.clipboard/settings.json"
+  property var settings: Settings.DEFAULT_SETTINGS
+
+  function loadSettings(raw) {
+    root.settings = Settings.parseSettings(raw)
+  }
+
+  function toggleReveal(historyIdx) {
+    var copy = Object.assign({}, root.revealedItems)
+    copy[historyIdx] = !copy[historyIdx]
+    root.revealedItems = copy
+    root.rebuildDisplay()
+  }
+
+  function toggleTagOnIndex(displayIdx, tag) {
+    if (displayIdx < 0 || displayIdx >= displayModel.count) return
+    var row = displayModel.get(displayIdx)
+    if (!row) return
+    root.history = ClipboardHistory.toggleEntryTag(root.history, row.historyIndex, tag)
+    root.saveHistory()
+    root.rebuildDisplay()
+  }
 
   property string historyPath: Quickshell.env("HOME") + "/.local/state/omarchy/clipboard-history.json"
   property string captureScript: Qt.resolvedUrl("capture.sh").toString().replace(/^file:\/\//, "")
@@ -65,6 +95,9 @@ Item {
     root.opened = true
     root.filterText = ""
     root.favoritesOnly = false
+    root.activeTypeFilter = "all"
+    root.activeTagFilter = "all"
+    root.revealedItems = ({})
     root.selectedIndex = 0
     root.cursorActive = true
     root.disarmPointer()
@@ -188,20 +221,36 @@ Item {
   }
 
   function rebuildDisplay() {
-    var rows = ClipboardHistory.displayRows(root.history, root.filterText, 50, root.favoritesOnly)
+    var rows = ClipboardHistory.displayRows(
+      root.history,
+      root.filterText,
+      50,
+      root.favoritesOnly,
+      root.activeTypeFilter,
+      root.activeTagFilter,
+      Classify,
+      Fuzzy,
+      Sanitize
+    )
 
     displayModel.clear()
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i]
+      var isRevealed = root.revealedItems[row.index] === true
+      var isMasked = row.sensitive && (!root.settings || root.settings.maskSensitiveText !== false) && !isRevealed
       displayModel.append({
         entryType: row.entryType,
         fullText: row.fullText,
-        previewText: row.previewText,
+        previewText: isMasked ? row.maskedPreview : row.previewText,
         previewImage: row.previewImage ? Util.fileUrl(row.previewImage) : "",
         path: row.path,
         mime: row.mime,
         favorite: row.favorite,
         truncated: row.truncated,
+        sensitive: row.sensitive,
+        sensitiveType: row.sensitiveType,
+        revealed: isRevealed,
+        tags: row.tags ? row.tags.slice() : [],
         historyIndex: row.index
       })
     }
@@ -317,6 +366,16 @@ Item {
     onFileChanged: reload()
   }
 
+  FileView {
+    id: settingsFile
+    path: root.settingsPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadSettings(text())
+    onLoadFailed: root.loadSettings("{}")
+    onFileChanged: reload()
+  }
+
   Process {
     id: backupCorruptProc
     command: ["sh", "-c", 'if [ -f "$1" ]; then cp "$1" "$1.bak-$(date +%s)"; fi', "backup", root.historyPath]
@@ -422,10 +481,30 @@ Item {
       width: root.cardWidth
       height: root.cardHeight
       radius: root.cornerRadius
-      anchors.top: parent.top
-      anchors.right: parent.right
-      anchors.topMargin: Style.bar.sizeHorizontal + Style.gapsOut
-      anchors.rightMargin: Style.gapsOut
+      x: {
+        var ox = (root.settings && root.settings.customOffset && root.settings.customOffset.x) || 0
+        var pos = (root.settings && root.settings.position) || "top-right"
+        var targetX
+        if (pos === "top-left") {
+          targetX = Style.gapsOut + ox
+        } else if (pos === "top-center" || pos === "center") {
+          targetX = Math.round((parent.width - width) / 2) + ox
+        } else {
+          targetX = parent.width - width - Style.gapsOut + ox
+        }
+        return Math.max(0, Math.min(targetX, Math.max(0, parent.width - width)))
+      }
+      y: {
+        var oy = (root.settings && root.settings.customOffset && root.settings.customOffset.y) || 0
+        var pos = (root.settings && root.settings.position) || "top-right"
+        var targetY
+        if (pos === "center") {
+          targetY = Math.round((parent.height - height) / 2) + oy
+        } else {
+          targetY = Style.bar.sizeHorizontal + Style.gapsOut + oy
+        }
+        return Math.max(0, Math.min(targetY, Math.max(0, parent.height - height)))
+      }
       color: root.background
       borderSpec: root.borderSpec
       padding: root.contentMargin
@@ -449,17 +528,24 @@ Item {
             if (root.filterText) root.setFilter("")
             else root.close()
             event.accepted = true
-          } else if ((event.modifiers & Qt.AltModifier) && (event.key === Qt.Key_F || event.key === Qt.Key_S)) {
+          } else if (((event.modifiers & Qt.AltModifier) && (event.key === Qt.Key_F || event.key === Qt.Key_S))
+                     || ((event.modifiers & Qt.ControlModifier) && (event.key === Qt.Key_D || event.key === Qt.Key_S))
+                     || (root.settings && root.settings.shortcuts && Settings.matchesShortcut(event, root.settings.shortcuts.favorite, Qt))) {
             if (root.cursorActive && displayModel.count > 0) {
               root.toggleFavoriteIndex(root.selectedIndex)
             }
             event.accepted = true
-          } else if ((event.modifiers & Qt.ControlModifier) && (event.key === Qt.Key_D || event.key === Qt.Key_S)) {
-            if (root.cursorActive && displayModel.count > 0) {
-              root.toggleFavoriteIndex(root.selectedIndex)
+          } else if ((event.modifiers & Qt.ControlModifier) && (event.key >= Qt.Key_1 && event.key <= Qt.Key_7)) {
+            var filterIds = ["all", "text", "link", "code", "image", "file", "color"]
+            var targetIdx = event.key - Qt.Key_1
+            if (targetIdx >= 0 && targetIdx < filterIds.length) {
+              root.activeTypeFilter = filterIds[targetIdx]
+              root.selectedIndex = 0
+              root.rebuildDisplay()
+              event.accepted = true
             }
-            event.accepted = true
-          } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+          } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab
+                     || (root.settings && root.settings.shortcuts && Settings.matchesShortcut(event, root.settings.shortcuts.toggleFavoritesView, Qt))) {
             root.favoritesOnly = !root.favoritesOnly
             root.selectedIndex = 0
             root.rebuildDisplay()
@@ -598,9 +684,120 @@ Item {
           }
         }
 
+        Row {
+          width: parent.width
+          height: Style.space(24)
+          spacing: Style.space(6)
+
+          Repeater {
+            model: [
+              { id: "all", label: "All" },
+              { id: "text", label: "Text" },
+              { id: "link", label: "Links" },
+              { id: "code", label: "Code" },
+              { id: "image", label: "Images" },
+              { id: "file", label: "Files" },
+              { id: "color", label: "Colors" }
+            ]
+
+            Rectangle {
+              required property var modelData
+              readonly property bool isSelected: root.activeTypeFilter === modelData.id
+              height: parent.height
+              width: chipText.implicitWidth + Style.space(16)
+              radius: root.cornerRadius
+              color: isSelected ? root.selectedBackground : (chipMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+              border.color: isSelected ? Color.accent : (chipMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+              border.width: 1
+
+              Text {
+                id: chipText
+                anchors.centerIn: parent
+                text: modelData.label
+                color: isSelected ? (root.selectedText || Color.accent) : (chipMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.65))
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: isSelected
+              }
+
+              MouseArea {
+                id: chipMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.activeTypeFilter = modelData.id
+                  root.selectedIndex = 0
+                  root.rebuildDisplay()
+                  keyCatcher.forceActiveFocus()
+                }
+              }
+            }
+          }
+        }
+
+        Row {
+          visible: root.favoritesOnly
+          width: parent.width
+          height: visible ? Style.space(24) : 0
+          spacing: Style.space(6)
+
+          Repeater {
+            model: {
+              if (!root.favoritesOnly) return []
+              var defaults = (root.settings && root.settings.defaultTagSet) ? root.settings.defaultTagSet.slice() : ["Code", "Links", "Tokens", "Todo"]
+              var allTags = ClipboardHistory.getAllTags(root.history)
+              var list = ["all"]
+              for (var i = 0; i < defaults.length; i++) {
+                var d = defaults[i].toLowerCase()
+                if (list.indexOf(d) < 0) list.push(d)
+              }
+              for (var j = 0; j < allTags.length; j++) {
+                var t = allTags[j].toLowerCase()
+                if (list.indexOf(t) < 0) list.push(t)
+              }
+              return list
+            }
+
+            Rectangle {
+              required property var modelData
+              readonly property bool isSelected: root.activeTagFilter === modelData
+              height: parent.height
+              width: tagChipText.implicitWidth + Style.space(16)
+              radius: root.cornerRadius
+              color: isSelected ? root.selectedBackground : (tagChipMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+              border.color: isSelected ? Color.accent : (tagChipMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+              border.width: 1
+
+              Text {
+                id: tagChipText
+                anchors.centerIn: parent
+                text: modelData === "all" ? "All Tags" : ("#" + modelData)
+                color: isSelected ? (root.selectedText || Color.accent) : (tagChipMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.65))
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: isSelected
+              }
+
+              MouseArea {
+                id: tagChipMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.activeTagFilter = modelData
+                  root.selectedIndex = 0
+                  root.rebuildDisplay()
+                  keyCatcher.forceActiveFocus()
+                }
+              }
+            }
+          }
+        }
+
         Item {
           width: parent.width
-          height: parent.height - root.headerHeight - root.contentSpacing
+          height: parent.height - root.headerHeight - Style.space(24) - (root.favoritesOnly ? Style.space(24) + root.contentSpacing : 0) - root.contentSpacing * 2
 
           Row {
             anchors.fill: parent
@@ -631,6 +828,11 @@ Item {
                   required property string previewImage
                   required property bool favorite
                   required property bool truncated
+                  required property bool sensitive
+                  required property string sensitiveType
+                  required property bool revealed
+                  required property var tags
+                  required property int historyIndex
 
                   readonly property bool hasCursor: root.cursorActive && index === root.selectedIndex
 
@@ -660,9 +862,46 @@ Item {
                       smooth: true
                     }
 
+                    Rectangle {
+                      visible: row.entryType === "color"
+                      width: visible ? parent.height : 0
+                      height: parent.height
+                      radius: Style.space(4)
+                      color: row.entryType === "color" ? row.fullText : "transparent"
+                      border.width: 1
+                      border.color: Util.alpha(root.foreground, 0.3)
+                    }
+
+                    Rectangle {
+                      visible: row.sensitive
+                      width: sensitiveLabel.implicitWidth + Style.space(12)
+                      height: Style.space(20)
+                      radius: Style.space(4)
+                      anchors.verticalCenter: parent.verticalCenter
+                      color: Util.alpha(Color.accent, 0.15)
+                      border.color: Util.alpha(Color.accent, 0.4)
+                      border.width: 1
+
+                      Text {
+                        id: sensitiveLabel
+                        anchors.centerIn: parent
+                        text: row.revealed ? "🔓 Secret" : "🔒 " + (row.sensitiveType || "Secret")
+                        color: Color.accent
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption - Style.space(1)
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleReveal(row.historyIndex)
+                      }
+                    }
+
                     Text {
                       textFormat: Text.PlainText
-                      width: parent.width - (row.previewImage.length > 0 ? parent.height + parent.spacing : 0)
+                      width: parent.width - (row.previewImage.length > 0 ? parent.height + parent.spacing : (row.entryType === "color" ? parent.height + parent.spacing : 0)) - (row.sensitive ? sensitiveLabel.implicitWidth + Style.space(12) + parent.spacing : 0)
                       height: parent.height
                       text: row.previewText + (row.truncated ? " [64KB capped]" : "")
                       color: row.hasCursor ? root.selectedText : root.foreground
@@ -742,8 +981,14 @@ Item {
                 anchors.leftMargin: root.contentMargin
                 anchors.rightMargin: 0
                 anchors.topMargin: 0
-                anchors.bottomMargin: 0
-                text: parent.activeRow ? parent.activeRow.fullText : ""
+                anchors.bottomMargin: (parent.activeRow && parent.activeRow.favorite) ? Style.space(32) : 0
+                text: {
+                  if (!parent.activeRow) return ""
+                  if (parent.activeRow.sensitive && !parent.activeRow.revealed && (!root.settings || root.settings.maskSensitiveText !== false)) {
+                    return "[🔒 " + (parent.activeRow.sensitiveType || "Secret") + " - Masked for privacy]\n\n" + Sanitize.maskText(parent.activeRow.fullText)
+                  }
+                  return parent.activeRow.fullText
+                }
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -758,12 +1003,72 @@ Item {
                 anchors.leftMargin: root.contentMargin
                 anchors.rightMargin: 0
                 anchors.topMargin: 0
-                anchors.bottomMargin: 0
+                anchors.bottomMargin: (parent.activeRow && parent.activeRow.favorite) ? Style.space(32) : 0
                 source: parent.activeRow ? parent.activeRow.previewImage : ""
                 fillMode: Image.PreserveAspectFit
                 verticalAlignment: Image.AlignTop
                 asynchronous: true
                 smooth: true
+              }
+
+              Row {
+                anchors.bottom: parent.bottom
+                anchors.left: parent.left
+                anchors.leftMargin: root.contentMargin
+                anchors.right: parent.right
+                height: Style.space(24)
+                spacing: Style.space(6)
+                visible: parent.activeRow && parent.activeRow.favorite
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Tags:"
+                  color: Util.alpha(root.foreground, 0.5)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Repeater {
+                  model: (root.settings && root.settings.defaultTagSet) ? root.settings.defaultTagSet : ["Code", "Links", "Tokens", "Todo"]
+
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool hasTag: {
+                      var rowTags = parent.parent.activeRow ? parent.parent.activeRow.tags : []
+                      if (!rowTags) return false
+                      for (var k = 0; k < rowTags.length; k++) {
+                        if (String(rowTags[k]).toLowerCase() === String(modelData).toLowerCase()) return true
+                      }
+                      return false
+                    }
+                    height: parent.height
+                    width: previewTagText.implicitWidth + Style.space(12)
+                    radius: Style.space(4)
+                    color: hasTag ? root.selectedBackground : (previewTagMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                    border.color: hasTag ? Color.accent : (previewTagMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.25))
+                    border.width: 1
+
+                    Text {
+                      id: previewTagText
+                      anchors.centerIn: parent
+                      text: "#" + modelData
+                      color: hasTag ? Color.accent : (previewTagMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.7))
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: hasTag
+                    }
+
+                    MouseArea {
+                      id: previewTagMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        root.toggleTagOnIndex(root.selectedIndex, modelData)
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -785,7 +1090,7 @@ Item {
 
             Text {
               textFormat: Text.PlainText
-              text: root.history.length === 0 ? "Clipboard is empty" : (root.favoritesOnly ? "No favorite items yet" : "No matches for “" + root.filterText + "”")
+              text: root.history.length === 0 ? "Clipboard is empty" : (root.favoritesOnly ? "No favorite items yet" : (root.activeTypeFilter !== "all" ? "No items of type “" + root.activeTypeFilter + "”" : "No matches for “" + root.filterText + "”"))
               color: root.foreground
               opacity: 0.7
               font.family: root.fontFamily

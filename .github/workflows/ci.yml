@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run unit test suite
+        run: npm test
+
+      - name: Validate manifest.json schema
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            const required = ["schemaVersion", "id", "name", "version", "author", "license", "description", "kinds", "entryPoints"];
+            for (const key of required) {
+              if (m[key] === undefined) throw new Error("Missing required manifest key: " + key);
+            }
+            console.log("manifest.json validation passed for " + m.id + " v" + m.version);
+          '

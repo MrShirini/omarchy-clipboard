@@ -202,6 +202,35 @@ test("displayRows supports limit, search query, and favoritesOnly filter", () =>
   assert.equal(limited.length, 2);
 });
 
+test("displayRows supports typeFilter parameter", () => {
+  const history = [
+    { type: "text", text: "https://example.com" },
+    { type: "text", text: "const x = 10;" },
+    { type: "image", path: "/tmp/pic.png", mime: "image/png" },
+    { type: "text", text: "#ff00aa" },
+    { type: "text", text: "Regular conversation" },
+  ];
+
+  const linkRows = History.displayRows(history, "", 50, false, "link");
+  assert.equal(linkRows.length, 1);
+  assert.equal(linkRows[0].entryType, "link");
+
+  const codeRows = History.displayRows(history, "", 50, false, "code");
+  assert.equal(codeRows.length, 1);
+  assert.equal(codeRows[0].entryType, "code");
+
+  const colorRows = History.displayRows(history, "", 50, false, "color");
+  assert.equal(colorRows.length, 1);
+  assert.equal(colorRows[0].entryType, "color");
+
+  const imageRows = History.displayRows(history, "", 50, false, "image");
+  assert.equal(imageRows.length, 1);
+  assert.equal(imageRows[0].entryType, "image");
+
+  const allRows = History.displayRows(history, "", 50, false, "all");
+  assert.equal(allRows.length, 5);
+});
+
 test("filePaths decodes file URIs including percent-encoded paths", () => {
   const entry = {
     type: "text",
@@ -343,4 +372,48 @@ test("referencedImagePaths and findOrphanedImages accurately identify orphaned d
     "/images/imgOrphan2.png",
   ]);
 });
+
+test("tags are preserved in normalizeEntry, setEntryTags, and toggleEntryTag", () => {
+  const raw = { type: "text", text: "npm test", tags: ["Code", "Work", "Code"] };
+  const normalized = History.normalizeEntry(raw);
+  assert.deepEqual(normalized.tags, ["Code", "Work"]);
+
+  let history = [normalized];
+  history = History.toggleEntryTag(history, 0, "Personal");
+  assert.deepEqual(history[0].tags, ["Code", "Work", "Personal"]);
+
+  history = History.toggleEntryTag(history, 0, "Work");
+  assert.deepEqual(history[0].tags, ["Code", "Personal"]);
+
+  history = History.setEntryTags(history, 0, ["Todo"]);
+  assert.deepEqual(history[0].tags, ["Todo"]);
+
+  assert.deepEqual(History.getAllTags(history), ["Todo"]);
+});
+
+test("displayRows supports tagFilter and sensitive data masking", () => {
+  const history = [
+    { type: "text", text: "https://example.com", tags: ["Links"], favorite: true },
+    { type: "text", text: "sk-abcdef12345678901234567890", tags: ["Tokens"], favorite: true },
+    { type: "text", text: "const x = 42;", tags: ["Code"], favorite: false }
+  ];
+
+  // Filter by tag
+  const linkRows = History.displayRows(history, "", 10, false, "all", "links");
+  assert.equal(linkRows.length, 1);
+  assert.equal(linkRows[0].fullText, "https://example.com");
+
+  const tokenRows = History.displayRows(history, "", 10, false, "all", "tokens");
+  assert.equal(tokenRows.length, 1);
+  assert.equal(tokenRows[0].sensitive, true);
+  assert.ok(tokenRows[0].maskedPreview.includes("••••••••"));
+  assert.equal(tokenRows[0].fullText, "sk-abcdef12345678901234567890"); // unmasked for copy/paste!
+
+  // Clear unstarred retains tags on starred items
+  const cleared = History.clearHistory(history);
+  assert.equal(cleared.length, 2);
+  assert.deepEqual(cleared[0].tags, ["Links"]);
+  assert.deepEqual(cleared[1].tags, ["Tokens"]);
+});
+
 
