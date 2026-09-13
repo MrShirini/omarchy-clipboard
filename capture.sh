@@ -30,6 +30,8 @@ emit_image() {
     return 0
   fi
 
+  local hash file bytes
+  bytes=$(wc -c <"$tmp" | tr -d ' ')
   hash=$(sha256sum "$tmp" | awk '{print $1}')
   file="$IMAGE_DIR/$hash.$ext"
   if [[ -e $file ]]; then
@@ -38,8 +40,8 @@ emit_image() {
     mv "$tmp" "$file"
   fi
 
-  jq -cn --arg mime "$mime" --arg path "$file" --arg captured_at "$(date +'%A %H:%M')" \
-    '{type:"image", mime:$mime, path:$path, capturedAt:$captured_at}'
+  jq -cn --arg mime "$mime" --arg path "$file" --arg captured_at "$(date +'%A %H:%M')" --argjson bytes "$bytes" \
+    '{type:"image", mime:$mime, path:$path, capturedAt:$captured_at, bytes:$bytes}'
 }
 
 emit_text() {
@@ -89,10 +91,29 @@ emit_text() {
   '
 }
 
+emit_uri_list() {
+  local uri_data
+  uri_data=$(wl-paste --type text/uri-list 2>/dev/null || cat)
+  if [[ -n $uri_data ]]; then
+    jq -cn --arg text "$uri_data" '{type:"text", mime:"text/uri-list", text:$text}'
+    exit 0
+  fi
+}
+
 case "${1:-}" in
-text) emit_text; exit 0 ;;
+text)
+  if grep -qx 'text/uri-list' <<<"$types"; then
+    emit_uri_list
+  fi
+  emit_text
+  exit 0
+  ;;
 image/*) emit_image "$1"; exit 0 ;;
 esac
+
+if grep -qx 'text/uri-list' <<<"$types"; then
+  emit_uri_list
+fi
 
 for mime in image/png image/jpeg image/webp image/gif image/bmp image/tiff; do
   if grep -qx "$mime" <<<"$types"; then

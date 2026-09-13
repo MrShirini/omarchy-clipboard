@@ -1,0 +1,9 @@
+{
+  "name": "omarchy-clipboard",
+  "version": "1.0.0",
+  "description": "Favorites-enabled fork of omarchy.clipboard",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

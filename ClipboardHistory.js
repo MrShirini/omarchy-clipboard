@@ -1,15 +1,37 @@
+var MAX_ENTRY_TEXT_LENGTH = 64 * 1024 // 64 KiB
+var MAX_TOTAL_HISTORY_BYTES = 1024 * 1024 // 1 MiB
+
 function normalizeEntry(value) {
-  if (typeof value === "string")
-    return value.trim().length > 0 ? { type: "text", text: value, favorite: false } : null
+  if (typeof value === "string") {
+    var trimmed = value.trim()
+    if (trimmed.length === 0) return null
+    var textVal = value
+    var truncated = false
+    if (textVal.length > MAX_ENTRY_TEXT_LENGTH) {
+      textVal = textVal.slice(0, MAX_ENTRY_TEXT_LENGTH)
+      truncated = true
+    }
+    var res = { type: "text", text: textVal, favorite: false }
+    if (truncated) res.truncated = true
+    return res
+  }
 
   if (!value || typeof value !== "object") return null
 
   var isFav = value.favorite === true
   var type = String(value.type || value.kind || "")
   if (type === "text") {
-    var text = String(value.text || "")
-    if (text.trim().length === 0) return null
-    var entry = { type: "text", text: text }
+    var rawText = String(value.text || "")
+    if (rawText.trim().length === 0) return null
+    var textVal = rawText
+    var truncated = value.truncated === true
+    if (textVal.length > MAX_ENTRY_TEXT_LENGTH) {
+      textVal = textVal.slice(0, MAX_ENTRY_TEXT_LENGTH)
+      truncated = true
+    }
+    var entry = { type: "text", text: textVal }
+    if (value.mime) entry.mime = String(value.mime)
+    if (truncated) entry.truncated = true
     if (isFav) entry.favorite = true
     return entry
   }
@@ -24,6 +46,10 @@ function normalizeEntry(value) {
     }
     if (value.capturedAt !== undefined && value.capturedAt !== null)
       entry.capturedAt = String(value.capturedAt)
+    if (value.bytes !== undefined && value.bytes !== null) {
+      var numBytes = Number(value.bytes)
+      if (!isNaN(numBytes) && numBytes > 0) entry.bytes = numBytes
+    }
     if (isFav) entry.favorite = true
     return entry
   }
@@ -37,23 +63,112 @@ function entryKey(entry) {
   return "text:" + String(entry.text || "")
 }
 
-function parseHistory(raw) {
+function parseHistoryResult(raw) {
+  var str = String(raw || "").trim()
+  if (!str || str === "[]") return { entries: [], corrupted: false }
   try {
-    var parsed = JSON.parse(String(raw || "[]"))
-    var next = []
-    if (!Array.isArray(parsed)) return next
+    var parsed = JSON.parse(str)
+    if (!Array.isArray(parsed)) return { entries: [], corrupted: true, error: "not an array" }
 
+    var next = []
     for (var i = 0; i < parsed.length; i++) {
       var entry = normalizeEntry(parsed[i])
       if (entry) next.push(entry)
     }
-    return next
+    return { entries: next, corrupted: false }
   } catch (e) {
-    return []
+    return { entries: [], corrupted: true, error: e.message }
   }
 }
 
-function addEntry(history, entry, limit) {
+function parseHistory(raw) {
+  return parseHistoryResult(raw).entries
+}
+
+function entrySizeBytes(entry) {
+  if (!entry) return 0
+  if (entry.type === "text") return (entry.text ? entry.text.length : 0) + 64
+  if (entry.type === "image") return (entry.bytes ? entry.bytes : 64 * 1024) + 64
+  return 128
+}
+
+var MAX_IMAGE_STORE_BYTES = 32 * 1024 * 1024 // 32 MiB
+
+function pruneImageStore(entries, maxBytes) {
+  var cap = maxBytes === undefined || maxBytes === null ? MAX_IMAGE_STORE_BYTES : Number(maxBytes)
+  if (isNaN(cap) || cap <= 0) return entries
+
+  var total = 0
+  for (var i = 0; i < entries.length; i++) {
+    var item = entries[i]
+    if (item && item.type === "image") {
+      total += (item.bytes ? item.bytes : 64 * 1024)
+    }
+  }
+
+  if (total <= cap) return entries
+
+  var result = entries.slice()
+  for (var j = result.length - 1; j >= 0 && total > cap; j--) {
+    var cand = result[j]
+    if (cand && cand.type === "image" && !cand.favorite) {
+      total -= (cand.bytes ? cand.bytes : 64 * 1024)
+      result.splice(j, 1)
+    }
+  }
+
+  return result
+}
+
+function pruneTotalSize(entries, maxBytes) {
+  var cap = maxBytes === undefined || maxBytes === null ? MAX_TOTAL_HISTORY_BYTES : Number(maxBytes)
+  if (isNaN(cap) || cap <= 0) return entries
+
+  var total = 0
+  for (var i = 0; i < entries.length; i++) {
+    total += entrySizeBytes(entries[i])
+  }
+
+  if (total <= cap) return entries
+
+  // Evict oldest unstarred entries first
+  var result = entries.slice()
+  for (var j = result.length - 1; j >= 0 && total > cap; j--) {
+    if (!result[j].favorite) {
+      total -= entrySizeBytes(result[j])
+      result.splice(j, 1)
+    }
+  }
+
+  return result
+}
+
+function referencedImagePaths(history) {
+  var values = Array.isArray(history) ? history : []
+  var paths = {}
+  for (var i = 0; i < values.length; i++) {
+    var entry = values[i]
+    if (entry && entry.type === "image" && entry.path) {
+      paths[entry.path] = true
+    }
+  }
+  return paths
+}
+
+function findOrphanedImages(history, imageFileList) {
+  var referenced = referencedImagePaths(history)
+  var files = Array.isArray(imageFileList) ? imageFileList : []
+  var orphans = []
+  for (var i = 0; i < files.length; i++) {
+    var file = String(files[i] || "")
+    if (file && !referenced[file]) {
+      orphans.push(file)
+    }
+  }
+  return orphans
+}
+
+function addEntry(history, entry, limit, maxBytes, maxImageBytes) {
   var normalized = normalizeEntry(entry)
   var max = limit === undefined || limit === null ? 100 : Number(limit)
   if (isNaN(max)) max = 100
@@ -80,7 +195,8 @@ function addEntry(history, entry, limit) {
     next.push(existing)
   }
 
-  return next
+  var prunedHistory = pruneTotalSize(next, maxBytes)
+  return pruneImageStore(prunedHistory, maxImageBytes)
 }
 
 function removeEntryAt(history, index) {
@@ -137,11 +253,25 @@ function filePaths(entry) {
 
   var lines = String(entry.text || "").split(/\r?\n/)
   var paths = []
+  var hasNonEmptyLine = false
+  var allLinesAreUris = true
+
   for (var i = 0; i < lines.length; i++) {
-    var path = decodeFileUri(lines[i])
-    if (path) paths.push(path)
+    var line = lines[i].trim()
+    if (!line || line.charAt(0) === "#") continue
+    hasNonEmptyLine = true
+    var path = decodeFileUri(line)
+    if (path) {
+      paths.push(path)
+    } else {
+      allLinesAreUris = false
+    }
   }
-  return paths
+
+  if (entry.mime === "text/uri-list") return paths
+  if (hasNonEmptyLine && allLinesAreUris) return paths
+
+  return []
 }
 
 function fileName(path) {
@@ -225,6 +355,7 @@ function displayRows(history, query, limit, favoritesOnly) {
       path: isImage ? String(entry.path || "") : (isFile && paths.length === 1 ? paths[0] : ""),
       mime: isImage ? String(entry.mime || "image/png") : "text/plain",
       favorite: !!entry.favorite,
+      truncated: !!entry.truncated,
       index: i
     })
     if (rows.length >= max) break
@@ -235,9 +366,18 @@ function displayRows(history, query, limit, favoritesOnly) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    MAX_ENTRY_TEXT_LENGTH: MAX_ENTRY_TEXT_LENGTH,
+    MAX_TOTAL_HISTORY_BYTES: MAX_TOTAL_HISTORY_BYTES,
+    MAX_IMAGE_STORE_BYTES: MAX_IMAGE_STORE_BYTES,
     normalizeEntry: normalizeEntry,
     entryKey: entryKey,
     parseHistory: parseHistory,
+    parseHistoryResult: parseHistoryResult,
+    pruneTotalSize: pruneTotalSize,
+    pruneImageStore: pruneImageStore,
+    referencedImagePaths: referencedImagePaths,
+    findOrphanedImages: findOrphanedImages,
+    entrySizeBytes: entrySizeBytes,
     addEntry: addEntry,
     removeEntryAt: removeEntryAt,
     clearHistory: clearHistory,

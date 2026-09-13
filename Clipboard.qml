@@ -1,6 +1,7 @@
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Hyprland
 import QtQuick
 import qs.Commons
 import qs.Ui
@@ -19,7 +20,7 @@ Item {
   property var history: []
 
   property string historyPath: Quickshell.env("HOME") + "/.local/state/omarchy/clipboard-history.json"
-  property string captureScript: root.omarchyPath + "/shell/plugins/clipboard/capture.sh"
+  property string captureScript: Qt.resolvedUrl("capture.sh").toString().replace(/^file:\/\//, "")
   // Shares the [menu] surface tokens — themes that style the menu also
   // style the clipboard. Selected-row colors composed in the
   // singleton so consumers drop them straight into Rectangle bindings.
@@ -35,12 +36,32 @@ Item {
   property int contentMargin: Style.spacing.panelPadding
   property int headerHeight: Math.max(Style.space(34), Style.font.title + Style.spacing.controlPaddingY * 2)
   property int contentSpacing: Style.spacing.md
-  property int cardWidth: Math.min(Style.space(720), panel.width - Style.gapsOut * 4)
-  property int cardHeight: Math.min(Style.space(520), panel.height - Style.bar.sizeHorizontal - Style.gapsOut * 4)
+  property var currentScreen: null
+
+  function activeScreen() {
+    var monitor = Hyprland.focusedMonitor
+    if (!monitor) return (Quickshell.screens && Quickshell.screens.length > 0) ? Quickshell.screens[0] : null
+    for (var i = 0; i < Quickshell.screens.length; i++) {
+      var scr = Quickshell.screens[i]
+      if (scr && (scr.name === monitor.name || scr === monitor)) return scr
+    }
+    return (Quickshell.screens && Quickshell.screens.length > 0) ? Quickshell.screens[0] : null
+  }
+
+  property int cardWidth: {
+    var maxW = panel && panel.width > 0 ? panel.width - Style.gapsOut * 2 : Style.space(720)
+    return Math.max(Math.min(Style.space(320), maxW), Math.min(Style.space(720), maxW))
+  }
+  property int cardHeight: {
+    var barH = Style.bar.sizeHorizontal
+    var maxH = panel && panel.height > 0 ? panel.height - barH - Style.gapsOut * 2 : Style.space(520)
+    return Math.max(Math.min(Style.space(240), maxH), Math.min(Style.space(520), maxH))
+  }
   property int rowHeight: Math.max(Style.space(50), Style.font.body + Style.font.caption + Style.spacing.rowPaddingX * 2)
   property int historyLimit: 300
 
   function open(payloadJson) {
+    root.currentScreen = root.activeScreen()
     root.opened = true
     root.filterText = ""
     root.favoritesOnly = false
@@ -54,6 +75,10 @@ Item {
   function close() {
     root.cancelClearHistory()
     root.opened = false
+    if (saveDebounceTimer.running) {
+      saveDebounceTimer.stop()
+      root.flushSaveHistory()
+    }
   }
 
   function toggle() {
@@ -70,12 +95,34 @@ Item {
   }
 
   function loadHistory(raw) {
-    root.history = ClipboardHistory.parseHistory(raw)
+    var res = ClipboardHistory.parseHistoryResult(raw)
+    if (res.corrupted) {
+      console.warn("Omarchy clipboard: corrupted history detected, creating backup. Error:", res.error)
+      backupCorruptProc.running = true
+    }
+    root.history = res.entries
     if (root.opened) root.rebuildDisplay()
   }
 
-  function saveHistory() {
+  Timer {
+    id: saveDebounceTimer
+    interval: 300
+    repeat: false
+    onTriggered: root.flushSaveHistory()
+  }
+
+  function saveHistory(immediate) {
+    if (immediate === true) {
+      saveDebounceTimer.stop()
+      root.flushSaveHistory()
+    } else {
+      saveDebounceTimer.restart()
+    }
+  }
+
+  function flushSaveHistory() {
     historyFile.setText(JSON.stringify(root.history.slice(0, root.historyLimit), null, 2) + "\n")
+    root.sweepImages()
   }
 
   function addClipboardEntry(entry) {
@@ -105,7 +152,7 @@ Item {
 
   function confirmClearHistory() {
     root.history = ClipboardHistory.clearHistory(root.history)
-    root.saveHistory()
+    root.saveHistory(true)
     root.selectedIndex = 0
     root.cursorActive = false
     root.disarmPointer()
@@ -119,7 +166,7 @@ Item {
 
     var row = displayModel.get(index)
     root.history = ClipboardHistory.removeEntryAt(root.history, row.historyIndex)
-    root.saveHistory()
+    root.saveHistory(true)
 
     if (displayModel.count <= 1) {
       root.selectedIndex = 0
@@ -154,6 +201,7 @@ Item {
         path: row.path,
         mime: row.mime,
         favorite: row.favorite,
+        truncated: row.truncated,
         historyIndex: row.index
       })
     }
@@ -269,12 +317,38 @@ Item {
     onFileChanged: reload()
   }
 
+  Process {
+    id: backupCorruptProc
+    command: ["sh", "-c", 'if [ -f "$1" ]; then cp "$1" "$1.bak-$(date +%s)"; fi', "backup", root.historyPath]
+  }
+
+  Process {
+    id: sweepImagesProc
+    command: ["sh", "-c", '
+      STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+      IMG_DIR="$STATE_DIR/clipboard-images"
+      HIST="$STATE_DIR/clipboard-history.json"
+      [ -d "$IMG_DIR" ] && [ -f "$HIST" ] || exit 0
+      ref=$(jq -r \'.[] | select(.type=="image" and .path!=null) | .path\' "$HIST" 2>/dev/null | sort -u)
+      for f in "$IMG_DIR"/*; do
+        [ -f "$f" ] || continue
+        if ! echo "$ref" | grep -Fqx "$f"; then
+          rm -f "$f"
+        fi
+      done
+    ']
+  }
+
+  function sweepImages() {
+    if (!sweepImagesProc.running) sweepImagesProc.running = true
+  }
+
   // Reap watchers left behind by a previous shell instance, then start our
   // own. The pdeathsig on the watchers makes the kernel kill them whenever
   // the shell exits, however it exits, so no further lifecycle management.
   Process {
     id: initProc
-    command: ["pkill", "-f", "wl-paste .*--watch .*/shell/plugins/clipboard/capture\\.sh"]
+    command: ["pkill", "-f", "wl-paste .*--watch .*capture\\.sh"]
     onExited: {
       currentProc.running = true
       textWatchProc.running = true
@@ -324,6 +398,7 @@ Item {
 
   PanelWindow {
     id: panel
+    screen: root.currentScreen
     visible: root.opened
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
@@ -493,7 +568,7 @@ Item {
 
               Text {
                 text: "★"
-                color: root.favoritesOnly ? "#f5a742" : (favFilterMouse.containsMouse ? "#ffd24d" : Util.alpha(root.foreground, 0.5))
+                color: root.favoritesOnly ? Color.accent : (favFilterMouse.containsMouse ? Util.alpha(Color.accent, 0.85) : Util.alpha(root.foreground, 0.5))
                 font.pixelSize: Style.font.body
                 verticalAlignment: Text.AlignVCenter
               }
@@ -542,6 +617,8 @@ Item {
                 anchors.rightMargin: root.contentMargin
                 model: displayModel
                 clip: true
+                reuseItems: true
+                cacheBuffer: root.rowHeight * 8
                 spacing: Style.space(4)
                 boundsBehavior: Flickable.StopAtBounds
 
@@ -553,6 +630,7 @@ Item {
                   required property string fullText
                   required property string previewImage
                   required property bool favorite
+                  required property bool truncated
 
                   readonly property bool hasCursor: root.cursorActive && index === root.selectedIndex
 
@@ -586,7 +664,7 @@ Item {
                       textFormat: Text.PlainText
                       width: parent.width - (row.previewImage.length > 0 ? parent.height + parent.spacing : 0)
                       height: parent.height
-                      text: row.previewText
+                      text: row.previewText + (row.truncated ? " [64KB capped]" : "")
                       color: row.hasCursor ? root.selectedText : root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.title
@@ -609,7 +687,7 @@ Item {
                     Text {
                       anchors.centerIn: parent
                       text: row.favorite ? "★" : (starMouse.containsMouse ? "★" : "☆")
-                      color: row.favorite ? "#f5a742" : (starMouse.containsMouse ? "#ffd24d" : (row.hasCursor ? Util.alpha(root.selectedText, 0.45) : Util.alpha(root.foreground, 0.3)))
+                      color: row.favorite ? Color.accent : (starMouse.containsMouse ? Util.alpha(Color.accent, 0.85) : (row.hasCursor ? Util.alpha(root.selectedText, 0.45) : Util.alpha(root.foreground, 0.3)))
                       font.pixelSize: Style.font.heading
                     }
 
