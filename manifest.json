@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "mrshirini.clipboard",
+  "name": "Clipboard (Favorites & Top-Right)",
+  "version": "1.0.0",
+  "author": "Amir Shirini",
+  "license": "MIT",
+  "description": "Enhanced Omarchy clipboard manager positioned at top-right with starring/favorites and bar widget.",
+  "kinds": [
+    "overlay",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Clipboard.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Clipboard",
+    "description": "Clipboard manager with favorites",
+    "category": "Tools",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.clipboard"
+  }
+}
