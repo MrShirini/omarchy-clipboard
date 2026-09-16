@@ -16,21 +16,60 @@ if [[ ${CLIPBOARD_STATE:-} == "sensitive" ]] || grep -qx 'x-kde-passwordManagerH
   exit 0
 fi
 
+MAX_IMAGE_BYTES="${CLIPBOARD_MAX_IMAGE_BYTES:-10485760}" # 10 MiB hard cap
+
+read_bounded_stream() {
+  local target="$1"
+  local max_bytes="$2"
+
+  perl -e '
+    my ($file, $max) = @ARGV;
+    open my $fh, ">", $file or exit 1;
+    binmode $fh;
+    my ($total, $buf) = (0, "");
+    while (my $bytes = sysread(STDIN, $buf, 65536)) {
+      $total += $bytes;
+      if ($total > $max) {
+        close $fh;
+        unlink $file;
+        exit 2;
+      }
+      my $written = 0;
+      while ($written < $bytes) {
+        my $n = syswrite($fh, $buf, $bytes - $written, $written);
+        if (!defined($n) || $n <= 0) {
+          close $fh;
+          unlink $file;
+          exit 1;
+        }
+        $written += $n;
+      }
+    }
+    close $fh;
+    if ($total == 0) {
+      unlink $file;
+      exit 1;
+    }
+    exit 0;
+  ' "$target" "$max_bytes"
+}
+
 emit_image() {
   local mime="$1"
-  local ext tmp hash file
+  local ext tmp hash file bytes
 
   ext=${mime#image/}
   [[ $ext == jpeg ]] && ext=jpg
 
   tmp=$(mktemp --tmpdir="$IMAGE_DIR" clipboard.XXXXXX) || return 0
-  cat >"$tmp"
-  if [[ ! -s $tmp ]]; then
+  trap 'rm -f "$tmp"' EXIT INT TERM
+
+  if ! read_bounded_stream "$tmp" "$MAX_IMAGE_BYTES" || [[ ! -s $tmp ]]; then
     rm -f "$tmp"
+    trap - EXIT INT TERM
     return 0
   fi
 
-  local hash file bytes
   bytes=$(wc -c <"$tmp" | tr -d ' ')
   hash=$(sha256sum "$tmp" | awk '{print $1}')
   file="$IMAGE_DIR/$hash.$ext"
@@ -39,6 +78,7 @@ emit_image() {
   else
     mv "$tmp" "$file"
   fi
+  trap - EXIT INT TERM
 
   jq -cn --arg mime "$mime" --arg path "$file" --arg captured_at "$(date +'%A %H:%M')" --argjson bytes "$bytes" \
     '{type:"image", mime:$mime, path:$path, capturedAt:$captured_at, bytes:$bytes}'

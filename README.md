@@ -21,6 +21,7 @@ Featuring **favorites & pinning**, **category tags**, **type filtering & fuzzy s
   - Atomic, debounced disk writes (300ms) with immediate flush on exit/mutation.
   - Corrupt JSON auto-recovery with automatic `.bak-<timestamp>` snapshots.
   - 64 KiB per-entry text cap with UI truncated badges.
+  - Bounded image stream reader (10 MiB hard cap per entry, configurable) with immediate stream abort and temp file cleanup.
   - 1 MiB total history cap and 32 MiB image store cap with oldest-unstarred eviction.
   - SHA-256 content-addressed image deduplication and background orphan image cleaner.
 - 🖥️ **Multi-Monitor & Safe Edge Clamping**: Dynamically follows the active focused monitor (`Hyprland.focusedMonitor`) and prevents screen clipping or overlapping the bar.
