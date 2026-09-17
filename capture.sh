@@ -17,6 +17,7 @@ if [[ ${CLIPBOARD_STATE:-} == "sensitive" ]] || grep -qx 'x-kde-passwordManagerH
 fi
 
 MAX_IMAGE_BYTES="${CLIPBOARD_MAX_IMAGE_BYTES:-10485760}" # 10 MiB hard cap
+MAX_TEXT_BYTES="${CLIPBOARD_MAX_TEXT_BYTES:-1048576}"    # 1 MiB hard ceiling
 
 read_bounded_stream() {
   local target="$1"
@@ -85,9 +86,17 @@ emit_image() {
 }
 
 emit_text() {
-  perl -MEncode=decode,FB_CROAK,LEAVE_SRC -MJSON::PP=encode_json -0777 -e '
-    my $raw = <STDIN>;
-    exit unless length $raw;
+  perl -MEncode=decode,FB_CROAK,LEAVE_SRC -MJSON::PP=encode_json -e '
+    my $max = $ARGV[0] || 1048576;
+    my ($total, $buf, $raw) = (0, "", "");
+    while (my $bytes = sysread(STDIN, $buf, 65536)) {
+      $total += $bytes;
+      if ($total > $max) {
+        exit 0;
+      }
+      $raw .= $buf;
+    }
+    exit 0 unless length $raw;
 
     my $encoding;
     my $heuristic_encoding = 0;
@@ -128,14 +137,31 @@ emit_text() {
     }
     $text = decode("UTF-8", $raw) unless defined $text;
     print "{\"type\":\"text\",\"text\":", encode_json($text), "}\n";
-  '
+  ' "$MAX_TEXT_BYTES"
+}
+
+parse_bounded_uri_list() {
+  perl -MJSON::PP=encode_json -e '
+    my $max = $ARGV[0] || 1048576;
+    my ($total, $buf, $raw) = (0, "", "");
+    while (my $bytes = sysread(STDIN, $buf, 65536)) {
+      $total += $bytes;
+      if ($total > $max) {
+        exit 2;
+      }
+      $raw .= $buf;
+    }
+    exit 1 unless length $raw;
+    print "{\"type\":\"text\",\"mime\":\"text/uri-list\",\"text\":", encode_json($raw), "}\n";
+    exit 0;
+  ' "$MAX_TEXT_BYTES"
 }
 
 emit_uri_list() {
-  local uri_data
-  uri_data=$(wl-paste --type text/uri-list 2>/dev/null || cat)
-  if [[ -n $uri_data ]]; then
-    jq -cn --arg text "$uri_data" '{type:"text", mime:"text/uri-list", text:$text}'
+  local uri_json
+  uri_json=$(timeout 2s wl-paste --type text/uri-list 2>/dev/null | parse_bounded_uri_list) || return 0
+  if [[ -n $uri_json ]]; then
+    printf '%s\n' "$uri_json"
     exit 0
   fi
 }
@@ -146,6 +172,10 @@ text)
     emit_uri_list
   fi
   emit_text
+  exit 0
+  ;;
+text/uri-list)
+  parse_bounded_uri_list || exit 0
   exit 0
   ;;
 image/*) emit_image "$1"; exit 0 ;;
@@ -163,5 +193,5 @@ for mime in image/png image/jpeg image/webp image/gif image/bmp image/tiff; do
 done
 
 if grep -q '^text/' <<<"$types" || grep -qx 'UTF8_STRING' <<<"$types" || grep -qx 'STRING' <<<"$types"; then
-  wl-paste --type text --no-newline 2>/dev/null | emit_text
+  timeout 2s wl-paste --type text --no-newline 2>/dev/null | emit_text
 fi

@@ -21,7 +21,7 @@ Featuring **favorites & pinning**, **category tags**, **type filtering & fuzzy s
   - Atomic, debounced disk writes (300ms) with immediate flush on exit/mutation.
   - Corrupt JSON auto-recovery with automatic `.bak-<timestamp>` snapshots.
   - 64 KiB per-entry text cap with UI truncated badges.
-  - Bounded image stream reader (10 MiB hard cap per entry, configurable) with immediate stream abort and temp file cleanup.
+  - Bounded text and image stream reader (1 MiB text ceiling, 10 MiB image cap per entry, configurable via `CLIPBOARD_MAX_TEXT_BYTES` and `CLIPBOARD_MAX_IMAGE_BYTES`) with immediate stream abort and temp file cleanup.
   - 1 MiB total history cap and 32 MiB image store cap with oldest-unstarred eviction.
   - SHA-256 content-addressed image deduplication and background orphan image cleaner.
 - 🖥️ **Multi-Monitor & Safe Edge Clamping**: Dynamically follows the active focused monitor (`Hyprland.focusedMonitor`) and prevents screen clipping or overlapping the bar.
@@ -93,6 +93,8 @@ Standard Omarchy utilities (pre-installed by default on Omarchy Linux):
 | <kbd>Delete</kbd> | Delete selected entry |
 | <kbd>Shift</kbd> + <kbd>Delete</kbd> | Clear unstarred history (favorites are kept) |
 | <kbd>Esc</kbd> | Clear search filter (or close overlay if search is empty) |
+| Click item | Copy item to clipboard (without pasting) |
+| <kbd>Alt</kbd> + Click item | Open item / URI in default application |
 
 ---
 
@@ -109,7 +111,8 @@ You can customize the plugin by creating `~/.config/omarchy/plugins/mrshirini.cl
     "toggleFavoritesView": "Tab"
   },
   "defaultTagSet": ["Code", "Links", "Tokens", "Todo"],
-  "maskSensitiveText": true
+  "maskSensitiveText": true,
+  "pasteOnClick": false
 }
 ```
 
@@ -118,6 +121,7 @@ You can customize the plugin by creating `~/.config/omarchy/plugins/mrshirini.cl
 - `shortcuts`: Custom key bindings matching your workflow.
 - `defaultTagSet`: List of category tags suggested and shown in the tag selector.
 - `maskSensitiveText`: `true` (default) to mask secrets in list view; `false` to disable masking.
+- `pasteOnClick`: `false` (default) copies item to clipboard on click without pasting; `true` automatically pastes on click.
 
 ---
 
