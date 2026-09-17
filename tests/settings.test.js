@@ -27,7 +27,8 @@ test("parseSettings parses customOffset and custom shortcuts", () => {
       favorite: "Ctrl+Shift+F"
     },
     defaultTagSet: ["Work", "Personal"],
-    maskSensitiveText: false
+    maskSensitiveText: false,
+    pasteOnClick: true
   };
 
   const parsed = Settings.parseSettings(JSON.stringify(custom));
@@ -37,6 +38,13 @@ test("parseSettings parses customOffset and custom shortcuts", () => {
   assert.equal(parsed.shortcuts.toggleFavoritesView, "Tab"); // preserved default
   assert.deepEqual(parsed.defaultTagSet, ["Work", "Personal"]);
   assert.equal(parsed.maskSensitiveText, false);
+  assert.equal(parsed.pasteOnClick, true);
+});
+
+test("parseSettings handles pasteOnClick default and explicit values", () => {
+  assert.equal(Settings.parseSettings("{}").pasteOnClick, false);
+  assert.equal(Settings.parseSettings('{"pasteOnClick": false}').pasteOnClick, false);
+  assert.equal(Settings.parseSettings('{"pasteOnClick": true}').pasteOnClick, true);
 });
 
 test("parseShortcut parses shortcut string into modifier and key components", () => {

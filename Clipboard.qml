@@ -875,6 +875,7 @@ Item {
 
                     Rectangle {
                       visible: row.sensitive
+                      z: 2
                       width: sensitiveLabel.implicitWidth + Style.space(12)
                       height: Style.space(20)
                       radius: Style.space(4)
@@ -950,10 +951,20 @@ Item {
                     onPositionChanged: function(mouse) {
                       root.selectFromPointer(row.index, row, mouse)
                     }
-                    onClicked: {
+                    onClicked: function(mouse) {
                       root.cursorActive = true
                       root.selectedIndex = row.index
-                      root.activateIndex(row.index)
+                      if (mouse && (mouse.modifiers & Qt.AltModifier)) {
+                        root.openIndex(row.index)
+                      } else if (root.settings && root.settings.pasteOnClick) {
+                        if (mouse && (mouse.modifiers & Qt.ShiftModifier)) {
+                          root.copyIndex(row.index)
+                        } else {
+                          root.activateIndex(row.index)
+                        }
+                      } else {
+                        root.copyIndex(row.index)
+                      }
                     }
                   }
                 }

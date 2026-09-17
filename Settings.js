@@ -6,7 +6,8 @@ var DEFAULT_SETTINGS = {
     toggleFavoritesView: "Tab"
   },
   defaultTagSet: ["Code", "Links", "Tokens", "Todo"],
-  maskSensitiveText: true
+  maskSensitiveText: true,
+  pasteOnClick: false
 }
 
 var ALLOWED_POSITIONS = ["top-right", "top-center", "top-left", "center"]
@@ -54,13 +55,15 @@ function parseSettings(raw) {
     }
 
     var maskSensitive = parsed.maskSensitiveText !== false
+    var pasteOnClick = Boolean(parsed.pasteOnClick)
 
     return {
       position: pos,
       customOffset: offset,
       shortcuts: shortcuts,
       defaultTagSet: tags,
-      maskSensitiveText: maskSensitive
+      maskSensitiveText: maskSensitive,
+      pasteOnClick: pasteOnClick
     }
   } catch (e) {
     return Object.assign({}, DEFAULT_SETTINGS)
