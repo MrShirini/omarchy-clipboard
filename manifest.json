@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "mrshirini.clipboard",
   "name": "Clipboard (Favorites & Top-Right)",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Amir Shirini",
   "license": "MIT",
   "description": "Enhanced Omarchy clipboard manager positioned at top-right with starring/favorites and bar widget.",

@@ -235,3 +235,46 @@ test("capture.sh decodes UTF-16 text payloads with bounded reader", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("capture.sh respects clipboard-paused state file and CLIPBOARD_PAUSED env var", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omarchy-test-"));
+  try {
+    const omarchyDir = path.join(tmpDir, "omarchy");
+    fs.mkdirSync(omarchyDir, { recursive: true });
+    const pausedFlag = path.join(omarchyDir, "clipboard-paused");
+
+    // Create pause flag file
+    fs.writeFileSync(pausedFlag, "1");
+
+    const resWithFlag = spawnSync(CAPTURE_SCRIPT, ["text"], {
+      input: "sensitive password or confidential text",
+      env: {
+        ...process.env,
+        XDG_STATE_HOME: tmpDir,
+        CLIPBOARD_STATE: "",
+      },
+    });
+
+    assert.equal(resWithFlag.status, 0);
+    assert.equal(resWithFlag.stdout.toString().trim(), "", "Should output nothing when paused flag exists");
+
+    // Remove flag file
+    fs.unlinkSync(pausedFlag);
+
+    // Test with CLIPBOARD_PAUSED=1 env var
+    const resWithEnv = spawnSync(CAPTURE_SCRIPT, ["text"], {
+      input: "confidential token",
+      env: {
+        ...process.env,
+        XDG_STATE_HOME: tmpDir,
+        CLIPBOARD_PAUSED: "1",
+        CLIPBOARD_STATE: "",
+      },
+    });
+
+    assert.equal(resWithEnv.status, 0);
+    assert.equal(resWithEnv.stdout.toString().trim(), "", "Should output nothing when CLIPBOARD_PAUSED=1");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

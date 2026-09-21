@@ -49,6 +49,9 @@ function normalizeEntry(value) {
       var tags = normalizeTags(value.tags)
       if (tags.length > 0) entry.tags = tags
     }
+    if (value.timestamp !== undefined && !isNaN(Number(value.timestamp))) {
+      entry.timestamp = Number(value.timestamp)
+    }
     return entry
   }
 
@@ -70,6 +73,9 @@ function normalizeEntry(value) {
     if (value.tags) {
       var imgTags = normalizeTags(value.tags)
       if (imgTags.length > 0) entry.tags = imgTags
+    }
+    if (value.timestamp !== undefined && !isNaN(Number(value.timestamp))) {
+      entry.timestamp = Number(value.timestamp)
     }
     return entry
   }
@@ -188,13 +194,32 @@ function findOrphanedImages(history, imageFileList) {
   return orphans
 }
 
-function addEntry(history, entry, limit, maxBytes, maxImageBytes) {
+function pruneRetention(entries, retentionDays, now) {
+  var days = Number(retentionDays)
+  if (isNaN(days) || days <= 0) return Array.isArray(entries) ? entries.slice() : []
+  var values = Array.isArray(entries) ? entries : []
+  var currentTime = (now !== undefined && now !== null) ? Number(now) : Date.now()
+  var cutoff = currentTime - (days * 24 * 60 * 60 * 1000)
+
+  return values.filter(function(item) {
+    if (!item) return false
+    if (item.favorite === true) return true
+    if (item.timestamp === undefined || item.timestamp === null) return true
+    return item.timestamp >= cutoff
+  })
+}
+
+function addEntry(history, entry, limit, maxBytes, maxImageBytes, retentionDays, now) {
   var normalized = normalizeEntry(entry)
   var max = limit === undefined || limit === null ? 100 : Number(limit)
   if (isNaN(max)) max = 100
   max = Math.max(0, max)
   if (!normalized) return Array.isArray(history) ? history.slice(0, max) : []
   if (max === 0) return []
+
+  if (normalized.timestamp === undefined) {
+    normalized.timestamp = (now !== undefined && now !== null) ? Number(now) : Date.now()
+  }
 
   var key = entryKey(normalized)
   var values = Array.isArray(history) ? history : []
@@ -204,6 +229,7 @@ function addEntry(history, entry, limit, maxBytes, maxImageBytes) {
     var existing = normalizeEntry(values[i])
     if (existing && entryKey(existing) === key) {
       if (existing.favorite) normalized.favorite = true
+      if (existing.tags && !normalized.tags) normalized.tags = existing.tags
       break
     }
   }
@@ -216,7 +242,11 @@ function addEntry(history, entry, limit, maxBytes, maxImageBytes) {
   }
 
   var prunedHistory = pruneTotalSize(next, maxBytes)
-  return pruneImageStore(prunedHistory, maxImageBytes)
+  prunedHistory = pruneImageStore(prunedHistory, maxImageBytes)
+  if (retentionDays && Number(retentionDays) > 0) {
+    prunedHistory = pruneRetention(prunedHistory, retentionDays, now)
+  }
+  return prunedHistory
 }
 
 function removeEntryAt(history, index) {
@@ -548,6 +578,7 @@ if (typeof module !== "undefined") {
     parseHistoryResult: parseHistoryResult,
     pruneTotalSize: pruneTotalSize,
     pruneImageStore: pruneImageStore,
+    pruneRetention: pruneRetention,
     referencedImagePaths: referencedImagePaths,
     findOrphanedImages: findOrphanedImages,
     entrySizeBytes: entrySizeBytes,

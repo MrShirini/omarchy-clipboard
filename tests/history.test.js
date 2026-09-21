@@ -419,4 +419,52 @@ test("displayRows supports tagFilter and sensitive data masking", () => {
   assert.deepEqual(cleared[1].tags, ["Tokens"]);
 });
 
+test("pruneRetention purges unstarred entries older than retention period and protects favorites", () => {
+  const now = 1726916400000; // Reference timestamp
+  const oneDayMs = 24 * 60 * 60 * 1000;
+
+  const entries = [
+    { type: "text", text: "Fresh item", timestamp: now - 1 * oneDayMs, favorite: false },
+    { type: "text", text: "Old unstarred item", timestamp: now - 15 * oneDayMs, favorite: false },
+    { type: "text", text: "Old starred favorite", timestamp: now - 30 * oneDayMs, favorite: true },
+    { type: "image", path: "/tmp/old.png", timestamp: now - 20 * oneDayMs, favorite: false },
+    { type: "image", path: "/tmp/starred.png", timestamp: now - 25 * oneDayMs, favorite: true },
+    { type: "text", text: "Legacy entry without timestamp", favorite: false }
+  ];
+
+  // Retention disabled (0 or <= 0): keeps everything
+  assert.equal(History.pruneRetention(entries, 0, now).length, 6);
+  assert.equal(History.pruneRetention(entries, -1, now).length, 6);
+
+  // Retention 14 days:
+  // - Fresh item (1 day old) -> keep
+  // - Old unstarred item (15 days old) -> PURGE
+  // - Old starred favorite (30 days old) -> PROTECTED / keep
+  // - Old unstarred image (20 days old) -> PURGE
+  // - Old starred image (25 days old) -> PROTECTED / keep
+  // - Legacy entry without timestamp -> keep
+  const pruned14 = History.pruneRetention(entries, 14, now);
+  assert.equal(pruned14.length, 4);
+  assert.equal(pruned14[0].text, "Fresh item");
+  assert.equal(pruned14[1].text, "Old starred favorite");
+  assert.equal(pruned14[1].favorite, true);
+  assert.equal(pruned14[2].path, "/tmp/starred.png");
+  assert.equal(pruned14[2].favorite, true);
+  assert.equal(pruned14[3].text, "Legacy entry without timestamp");
+
+  // addEntry respects retentionDays parameter
+  const updated = History.addEntry(
+    entries,
+    { type: "text", text: "Brand new" },
+    100,
+    1024 * 1024,
+    32 * 1024 * 1024,
+    14,
+    now
+  );
+  assert.equal(updated.length, 5); // 4 kept + 1 brand new
+  assert.equal(updated[0].text, "Brand new");
+  assert.equal(updated[0].timestamp, now);
+});
+
 

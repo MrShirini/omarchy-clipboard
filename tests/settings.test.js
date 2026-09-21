@@ -68,3 +68,70 @@ test("matchesShortcut matches event against shortcut specification", () => {
   assert.equal(Settings.matchesShortcut(tabEvent, "Tab"), true);
 });
 
+test("parseSettings parses maxHistoryEntries, retentionDays, and storage limits", () => {
+  const custom = {
+    maxHistoryEntries: 500,
+    retentionDays: 14,
+    maxTotalHistoryMB: 2,
+    maxImageStoreMB: 64,
+    shortcuts: {
+      togglePause: "Ctrl+Shift+P",
+      openSettings: "Ctrl+Alt+S"
+    }
+  };
+  const parsed = Settings.parseSettings(JSON.stringify(custom));
+  assert.equal(parsed.maxHistoryEntries, 500);
+  assert.equal(parsed.retentionDays, 14);
+  assert.equal(parsed.maxTotalHistoryMB, 2);
+  assert.equal(parsed.maxImageStoreMB, 64);
+  assert.equal(parsed.shortcuts.togglePause, "Ctrl+Shift+P");
+  assert.equal(parsed.shortcuts.openSettings, "Ctrl+Alt+S");
+
+  // Invalid values fall back to defaults
+  const invalid = Settings.parseSettings(JSON.stringify({
+    maxHistoryEntries: 2, // below minimum 10
+    retentionDays: -5,
+    maxTotalHistoryMB: -1,
+    maxImageStoreMB: 0
+  }));
+  assert.equal(invalid.maxHistoryEntries, 300);
+  assert.equal(invalid.retentionDays, 0);
+  assert.equal(invalid.maxTotalHistoryMB, 1);
+  assert.equal(invalid.maxImageStoreMB, 32);
+});
+
+test("parseSettings parses windowSize presets and custom width/height dimensions", () => {
+  // Presets
+  assert.equal(Settings.parseSettings('{"windowSize": "compact"}').windowSize, "compact");
+  assert.equal(Settings.parseSettings('{"windowSize": "compact"}').windowWidth, 600);
+  assert.equal(Settings.parseSettings('{"windowSize": "compact"}').windowHeight, 420);
+
+  assert.equal(Settings.parseSettings('{"windowSize": "large"}').windowSize, "large");
+  assert.equal(Settings.parseSettings('{"windowSize": "large"}').windowWidth, 880);
+  assert.equal(Settings.parseSettings('{"windowSize": "large"}').windowHeight, 620);
+
+  assert.equal(Settings.parseSettings('{"windowSize": "expanded"}').windowSize, "expanded");
+  assert.equal(Settings.parseSettings('{"windowSize": "expanded"}').windowWidth, 1040);
+  assert.equal(Settings.parseSettings('{"windowSize": "expanded"}').windowHeight, 720);
+
+  // Custom dimensions
+  const custom = Settings.parseSettings(JSON.stringify({
+    windowSize: "custom",
+    windowWidth: 900,
+    windowHeight: 650
+  }));
+  assert.equal(custom.windowSize, "custom");
+  assert.equal(custom.windowWidth, 900);
+  assert.equal(custom.windowHeight, 650);
+
+  // Fallbacks for invalid values
+  const invalid = Settings.parseSettings(JSON.stringify({
+    windowSize: "gigantic",
+    windowWidth: 50, // too small
+    windowHeight: 99999 // too large
+  }));
+  assert.equal(invalid.windowSize, "medium");
+  assert.equal(invalid.windowWidth, 720);
+  assert.equal(invalid.windowHeight, 520);
+});
+

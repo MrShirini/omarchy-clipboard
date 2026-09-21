@@ -24,13 +24,78 @@ Item {
   property int selectedIndex: 0
   property bool cursorActive: false
   property bool clearConfirmOpen: false
+  property bool paused: false
+  property bool settingsOpen: false
   property var history: []
 
   property string settingsPath: (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/omarchy/plugins/mrshirini.clipboard/settings.json"
   property var settings: Settings.DEFAULT_SETTINGS
 
+  property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy"
+  property string historyPath: stateDir + "/clipboard-history.json"
+  property string pausedPath: stateDir + "/clipboard-paused"
+
+  FileView {
+    id: pausedFile
+    path: root.pausedPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.paused = true
+    onLoadFailed: root.paused = false
+    onFileChanged: reload()
+  }
+
+  Process {
+    id: togglePauseFileProc
+    command: ["true"]
+  }
+
+  function togglePause() {
+    root.setPaused(!root.paused)
+  }
+
+  function setPaused(val) {
+    root.paused = val
+    if (val) {
+      togglePauseFileProc.command = ["sh", "-c", 'mkdir -p "$(dirname "$1")"; touch "$1"', "pause", root.pausedPath]
+    } else {
+      togglePauseFileProc.command = ["sh", "-c", 'rm -f "$1"', "pause", root.pausedPath]
+    }
+    togglePauseFileProc.running = true
+  }
+
   function loadSettings(raw) {
     root.settings = Settings.parseSettings(raw)
+  }
+
+  function updateSettings(patchObj) {
+    var copy = Object.assign({}, root.settings, patchObj)
+    root.settings = Settings.parseSettings(JSON.stringify(copy))
+    settingsFile.setText(JSON.stringify(root.settings, null, 2) + "\n")
+
+    // Prune history immediately if capacity or retention changed
+    var retention = (root.settings && root.settings.retentionDays) || 0
+    var list = root.history.slice()
+    if (retention > 0) {
+      list = ClipboardHistory.pruneRetention(list, retention)
+    }
+    var limit = (root.settings && root.settings.maxHistoryEntries) || root.historyLimit
+    var maxBytes = ((root.settings && root.settings.maxTotalHistoryMB) || 1) * 1024 * 1024
+    var maxImageBytes = ((root.settings && root.settings.maxImageStoreMB) || 32) * 1024 * 1024
+    list = ClipboardHistory.pruneTotalSize(list, maxBytes)
+    list = ClipboardHistory.pruneImageStore(list, maxImageBytes)
+    if (list.length > limit) {
+      list = list.slice(0, limit)
+    }
+    root.history = list
+    root.saveHistory(true)
+    root.rebuildDisplay()
+  }
+
+  function updateSetting(key, val) {
+    var patch = {}
+    patch[key] = val
+    root.updateSettings(patch)
   }
 
   function toggleReveal(historyIdx) {
@@ -48,9 +113,6 @@ Item {
     root.saveHistory()
     root.rebuildDisplay()
   }
-
-  property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy"
-  property string historyPath: stateDir + "/clipboard-history.json"
   property string captureScript: Qt.resolvedUrl("capture.sh").toString().replace(/^file:\/\//, "")
   // Shares the [menu] surface tokens — themes that style the menu also
   // style the clipboard. Selected-row colors composed in the
@@ -80,20 +142,27 @@ Item {
   }
 
   property int cardWidth: {
-    var maxW = panel && panel.width > 0 ? panel.width - Style.gapsOut * 2 : Style.space(720)
-    return Math.max(Math.min(Style.space(320), maxW), Math.min(Style.space(720), maxW))
+    var targetW = (root.settings && root.settings.windowWidth) || 720
+    var maxW = panel && panel.width > 0 ? panel.width - Style.gapsOut * 2 : Style.space(targetW)
+    return Math.max(Math.min(Style.space(320), maxW), Math.min(Style.space(targetW), maxW))
   }
   property int cardHeight: {
     var barH = Style.bar.sizeHorizontal
-    var maxH = panel && panel.height > 0 ? panel.height - barH - Style.gapsOut * 2 : Style.space(520)
-    return Math.max(Math.min(Style.space(240), maxH), Math.min(Style.space(520), maxH))
+    var targetH = (root.settings && root.settings.windowHeight) || 520
+    var maxH = panel && panel.height > 0 ? panel.height - barH - Style.gapsOut * 2 : Style.space(targetH)
+    return Math.max(Math.min(Style.space(240), maxH), Math.min(Style.space(targetH), maxH))
   }
   property int rowHeight: Math.max(Style.space(50), Style.font.body + Style.font.caption + Style.spacing.rowPaddingX * 2)
-  property int historyLimit: 300
+  property int historyLimit: (root.settings && root.settings.maxHistoryEntries) || 300
 
   function open(payloadJson) {
     root.currentScreen = root.activeScreen()
     root.opened = true
+    root.settingsOpen = false
+    var retention = (root.settings && root.settings.retentionDays) || 0
+    if (retention > 0) {
+      root.history = ClipboardHistory.pruneRetention(root.history, retention)
+    }
     root.filterText = ""
     root.favoritesOnly = false
     root.activeTypeFilter = "all"
@@ -108,6 +177,7 @@ Item {
 
   function close() {
     root.cancelClearHistory()
+    root.settingsOpen = false
     root.opened = false
     if (saveDebounceTimer.running) {
       saveDebounceTimer.stop()
@@ -134,7 +204,20 @@ Item {
       console.warn("Omarchy clipboard: corrupted history detected, creating backup. Error:", res.error)
       backupCorruptProc.running = true
     }
-    root.history = res.entries
+    var list = res.entries
+    var retention = (root.settings && root.settings.retentionDays) || 0
+    if (retention > 0) {
+      list = ClipboardHistory.pruneRetention(list, retention)
+    }
+    var limit = (root.settings && root.settings.maxHistoryEntries) || root.historyLimit
+    var maxBytes = ((root.settings && root.settings.maxTotalHistoryMB) || 1) * 1024 * 1024
+    var maxImageBytes = ((root.settings && root.settings.maxImageStoreMB) || 32) * 1024 * 1024
+    list = ClipboardHistory.pruneTotalSize(list, maxBytes)
+    list = ClipboardHistory.pruneImageStore(list, maxImageBytes)
+    if (list.length > limit) {
+      list = list.slice(0, limit)
+    }
+    root.history = list
     if (root.opened) root.rebuildDisplay()
   }
 
@@ -155,15 +238,22 @@ Item {
   }
 
   function flushSaveHistory() {
-    historyFile.setText(JSON.stringify(root.history.slice(0, root.historyLimit), null, 2) + "\n")
+    var limit = (root.settings && root.settings.maxHistoryEntries) || root.historyLimit
+    historyFile.setText(JSON.stringify(root.history.slice(0, limit), null, 2) + "\n")
     root.sweepImages()
   }
 
   function addClipboardEntry(entry) {
+    if (root.paused) return
     var normalized = ClipboardHistory.normalizeEntry(entry)
     if (!normalized) return
 
-    root.history = ClipboardHistory.addEntry(root.history, normalized, root.historyLimit)
+    var limit = (root.settings && root.settings.maxHistoryEntries) || root.historyLimit
+    var maxBytes = ((root.settings && root.settings.maxTotalHistoryMB) || 1) * 1024 * 1024
+    var maxImageBytes = ((root.settings && root.settings.maxImageStoreMB) || 32) * 1024 * 1024
+    var retention = (root.settings && root.settings.retentionDays) || 0
+
+    root.history = ClipboardHistory.addEntry(root.history, normalized, limit, maxBytes, maxImageBytes, retention)
     root.saveHistory()
     if (root.opened) root.rebuildDisplay()
   }
@@ -371,6 +461,7 @@ Item {
     id: settingsFile
     path: root.settingsPath
     watchChanges: true
+    atomicWrites: true
     printErrors: false
     onLoaded: root.loadSettings(text())
     onLoadFailed: root.loadSettings("{}")
@@ -408,7 +499,7 @@ Item {
   // the shell exits, however it exits, so no further lifecycle management.
   Process {
     id: initProc
-    command: ["sh", "-c", "mkdir -p \"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-images\"; pkill -f 'wl-paste .*--watch .*capture\\.sh' || true"]
+    command: ["sh", "-c", "mkdir -p \"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-images\" \"${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/mrshirini.clipboard\"; pkill -f 'wl-paste .*--watch .*capture\\.sh' || true"]
     onExited: {
       currentProc.running = true
       textWatchProc.running = true
@@ -525,9 +616,33 @@ Item {
             return
           }
 
+          if (root.settingsOpen) {
+            if (event.key === Qt.Key_Escape) {
+              root.settingsOpen = false
+              event.accepted = true
+            } else if (((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Comma)
+                       || (root.settings && root.settings.shortcuts && Settings.matchesShortcut(event, root.settings.shortcuts.openSettings, Qt))) {
+              root.settingsOpen = false
+              event.accepted = true
+            } else if (((event.modifiers & Qt.AltModifier) && event.key === Qt.Key_P)
+                       || (root.settings && root.settings.shortcuts && Settings.matchesShortcut(event, root.settings.shortcuts.togglePause, Qt))) {
+              root.togglePause()
+              event.accepted = true
+            }
+            return
+          }
+
           if (event.key === Qt.Key_Escape) {
             if (root.filterText) root.setFilter("")
             else root.close()
+            event.accepted = true
+          } else if (((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Comma)
+                     || (root.settings && root.settings.shortcuts && Settings.matchesShortcut(event, root.settings.shortcuts.openSettings, Qt))) {
+            root.settingsOpen = true
+            event.accepted = true
+          } else if (((event.modifiers & Qt.AltModifier) && event.key === Qt.Key_P)
+                     || (root.settings && root.settings.shortcuts && Settings.matchesShortcut(event, root.settings.shortcuts.togglePause, Qt))) {
+            root.togglePause()
             event.accepted = true
           } else if (((event.modifiers & Qt.AltModifier) && (event.key === Qt.Key_F || event.key === Qt.Key_S))
                      || ((event.modifiers & Qt.ControlModifier) && (event.key === Qt.Key_D || event.key === Qt.Key_S))
@@ -622,7 +737,7 @@ Item {
           spacing: Style.space(8)
 
           Item {
-            width: parent.width - favFilterBtn.width - parent.spacing
+            width: parent.width - favFilterBtn.width - pauseBtn.width - settingsBtn.width - parent.spacing * (root.settingsOpen ? 1 : 3)
             height: parent.height
 
             Text {
@@ -630,18 +745,70 @@ Item {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              text: root.filterText || (root.favoritesOnly ? "Search favorites…" : "Search clipboard…")
+              text: root.settingsOpen
+                ? "Settings & Preferences"
+                : (root.filterText || (root.favoritesOnly ? "Search favorites…" : "Search clipboard…"))
               color: root.foreground
-              opacity: root.filterText ? 1 : 0.58
+              opacity: (root.settingsOpen || root.filterText) ? 1 : 0.58
               font.family: root.fontFamily
               font.pixelSize: Style.font.heading
+              font.bold: root.settingsOpen
               elide: Text.ElideRight
             }
           }
 
           Rectangle {
+            id: pauseBtn
+            visible: !root.settingsOpen
+            width: visible ? (pauseRow.implicitWidth + Style.space(16)) : 0
+            height: parent.height
+            radius: root.cornerRadius
+            color: root.paused
+              ? Util.alpha(Color.accent, 0.2)
+              : (pauseMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+            border.color: root.paused
+              ? Color.accent
+              : (pauseMouse.containsMouse ? Util.alpha(root.foreground, 0.3) : Util.alpha(root.border, 0.25))
+            border.width: 1
+
+            Row {
+              id: pauseRow
+              anchors.centerIn: parent
+              spacing: Style.space(6)
+
+              Text {
+                text: root.paused ? "󰐊" : "󰏤"
+                color: root.paused ? Color.accent : (pauseMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                font.pixelSize: Style.font.body
+                verticalAlignment: Text.AlignVCenter
+              }
+
+              Text {
+                text: root.paused ? "Resume" : "Pause"
+                color: root.paused ? Color.accent : (pauseMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: root.paused
+                verticalAlignment: Text.AlignVCenter
+              }
+            }
+
+            MouseArea {
+              id: pauseMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                root.togglePause()
+                keyCatcher.forceActiveFocus()
+              }
+            }
+          }
+
+          Rectangle {
             id: favFilterBtn
-            width: favFilterRow.implicitWidth + Style.space(16)
+            visible: !root.settingsOpen
+            width: visible ? (favFilterRow.implicitWidth + Style.space(16)) : 0
             height: parent.height
             radius: root.cornerRadius
             color: root.favoritesOnly ? root.selectedBackground : (favFilterMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
@@ -683,11 +850,120 @@ Item {
               }
             }
           }
+
+          Rectangle {
+            id: settingsBtn
+            width: settingsRow.implicitWidth + Style.space(16)
+            height: parent.height
+            radius: root.cornerRadius
+            color: root.settingsOpen ? root.selectedBackground : (settingsMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+            border.color: root.settingsOpen ? Color.accent : (settingsMouse.containsMouse ? Util.alpha(root.foreground, 0.3) : Util.alpha(root.border, 0.25))
+            border.width: 1
+
+            Row {
+              id: settingsRow
+              anchors.centerIn: parent
+              spacing: Style.space(6)
+
+              Text {
+                text: root.settingsOpen ? "✓" : "⚙"
+                color: root.settingsOpen ? (root.selectedText || Color.accent) : (settingsMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                font.pixelSize: Style.font.body
+                verticalAlignment: Text.AlignVCenter
+              }
+
+              Text {
+                text: root.settingsOpen ? "Done" : "Settings"
+                color: root.settingsOpen ? (root.selectedText || Color.accent) : (settingsMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: root.settingsOpen
+                verticalAlignment: Text.AlignVCenter
+              }
+            }
+
+            MouseArea {
+              id: settingsMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                root.settingsOpen = !root.settingsOpen
+                keyCatcher.forceActiveFocus()
+              }
+            }
+          }
+        }
+
+        Rectangle {
+          visible: root.paused && !root.settingsOpen
+          width: parent.width
+          height: visible ? Style.space(28) : 0
+          radius: Style.space(4)
+          color: Util.alpha(Color.accent, 0.15)
+          border.color: Util.alpha(Color.accent, 0.4)
+          border.width: 1
+
+          Row {
+            anchors.centerIn: parent
+            spacing: Style.space(8)
+
+            Text {
+              text: "󰏤 History paused (Incognito active) — New copies will not be saved."
+              color: Color.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              verticalAlignment: Text.AlignVCenter
+            }
+
+            Rectangle {
+              height: Style.space(20)
+              width: resumeBannerRow.implicitWidth + Style.space(12)
+              radius: Style.space(3)
+              color: resumeMouse.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.25)
+
+              Row {
+                id: resumeBannerRow
+                anchors.centerIn: parent
+                spacing: Style.space(4)
+
+                Text {
+                  text: "󰐊"
+                  color: resumeMouse.containsMouse ? root.background : Color.accent
+                  font.pixelSize: Style.font.caption - Style.space(1)
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                Text {
+                  id: resumeText
+                  text: "Resume"
+                  color: resumeMouse.containsMouse ? root.background : Color.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption - Style.space(1)
+                  font.bold: true
+                  verticalAlignment: Text.AlignVCenter
+                }
+              }
+
+              MouseArea {
+                id: resumeMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.setPaused(false)
+                  keyCatcher.forceActiveFocus()
+                }
+              }
+            }
+          }
         }
 
         Row {
+          visible: !root.settingsOpen
           width: parent.width
-          height: Style.space(24)
+          height: visible ? Style.space(24) : 0
           spacing: Style.space(6)
 
           Repeater {
@@ -738,7 +1014,7 @@ Item {
         }
 
         Row {
-          visible: root.favoritesOnly
+          visible: root.favoritesOnly && !root.settingsOpen
           width: parent.width
           height: visible ? Style.space(24) : 0
           spacing: Style.space(6)
@@ -797,8 +1073,9 @@ Item {
         }
 
         Item {
+          visible: !root.settingsOpen
           width: parent.width
-          height: parent.height - root.headerHeight - Style.space(24) - (root.favoritesOnly ? Style.space(24) + root.contentSpacing : 0) - root.contentSpacing * 2
+          height: visible ? (parent.height - root.headerHeight - Style.space(24) - (root.favoritesOnly ? Style.space(24) + root.contentSpacing : 0) - (root.paused ? Style.space(28) + root.contentSpacing : 0) - root.contentSpacing * 2) : 0
 
           Row {
             anchors.fill: parent
@@ -1109,6 +1386,742 @@ Item {
               font.pixelSize: Style.font.title
               horizontalAlignment: Text.AlignHCenter
               width: parent.width
+            }
+          }
+        }
+
+        Flickable {
+          id: settingsPanel
+          visible: root.settingsOpen
+          width: parent.width
+          height: visible ? (parent.height - root.headerHeight - root.contentSpacing) : 0
+          contentWidth: width
+          contentHeight: settingsColumn.implicitHeight + Style.space(24)
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+
+          Column {
+            id: settingsColumn
+            width: parent.width
+            spacing: Style.space(16)
+
+            // 1. Overlay Window Size & Dimensions
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                text: "Overlay Window Size"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                text: "Select a preset size or adjust width and height to fit your screen."
+                color: Util.alpha(root.foreground, 0.65)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.Wrap
+                width: parent.width
+              }
+
+              Row {
+                spacing: Style.space(6)
+                Repeater {
+                  model: [
+                    { id: "compact", label: "Compact (600×420)", w: 600, h: 420 },
+                    { id: "medium", label: "Medium (720×520)", w: 720, h: 520 },
+                    { id: "large", label: "Large (880×620)", w: 880, h: 620 },
+                    { id: "expanded", label: "Expanded (1040×720)", w: 1040, h: 720 }
+                  ]
+
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool isSelected: (root.settings && root.settings.windowWidth === modelData.w && root.settings.windowHeight === modelData.h)
+                    height: Style.space(26)
+                    width: sizeChipText.implicitWidth + Style.space(16)
+                    radius: root.cornerRadius
+                    color: isSelected ? root.selectedBackground : (sizeChipMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                    border.color: isSelected ? Color.accent : (sizeChipMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+                    border.width: 1
+
+                    Text {
+                      id: sizeChipText
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: isSelected ? (root.selectedText || Color.accent) : (sizeChipMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: isSelected
+                    }
+
+                    MouseArea {
+                      id: sizeChipMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        root.updateSettings({
+                          windowSize: modelData.id,
+                          windowWidth: modelData.w,
+                          windowHeight: modelData.h
+                        })
+                      }
+                    }
+                  }
+                }
+              }
+
+              Row {
+                spacing: Style.space(16)
+
+                // Width adjuster
+                Row {
+                  spacing: Style.space(6)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Width: " + ((root.settings && root.settings.windowWidth) || 720) + "px"
+                    color: Util.alpha(root.foreground, 0.85)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+
+                  Rectangle {
+                    height: Style.space(24)
+                    width: Style.space(26)
+                    radius: root.cornerRadius
+                    color: wMinusMouse.containsMouse ? Util.alpha(root.foreground, 0.12) : Util.alpha(root.foreground, 0.05)
+                    border.color: Util.alpha(root.border, 0.25)
+                    border.width: 1
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "−"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.bold: true
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    MouseArea {
+                      id: wMinusMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var curW = (root.settings && root.settings.windowWidth) || 720
+                        root.updateSettings({
+                          windowSize: "custom",
+                          windowWidth: Math.max(480, curW - 40)
+                        })
+                      }
+                    }
+                  }
+
+                  Rectangle {
+                    height: Style.space(24)
+                    width: Style.space(26)
+                    radius: root.cornerRadius
+                    color: wPlusMouse.containsMouse ? Util.alpha(root.foreground, 0.12) : Util.alpha(root.foreground, 0.05)
+                    border.color: Util.alpha(root.border, 0.25)
+                    border.width: 1
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "+"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.bold: true
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    MouseArea {
+                      id: wPlusMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var curW = (root.settings && root.settings.windowWidth) || 720
+                        root.updateSettings({
+                          windowSize: "custom",
+                          windowWidth: Math.min(1600, curW + 40)
+                        })
+                      }
+                    }
+                  }
+                }
+
+                // Height adjuster
+                Row {
+                  spacing: Style.space(6)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Height: " + ((root.settings && root.settings.windowHeight) || 520) + "px"
+                    color: Util.alpha(root.foreground, 0.85)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+
+                  Rectangle {
+                    height: Style.space(24)
+                    width: Style.space(26)
+                    radius: root.cornerRadius
+                    color: hMinusMouse.containsMouse ? Util.alpha(root.foreground, 0.12) : Util.alpha(root.foreground, 0.05)
+                    border.color: Util.alpha(root.border, 0.25)
+                    border.width: 1
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "−"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.bold: true
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    MouseArea {
+                      id: hMinusMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var curH = (root.settings && root.settings.windowHeight) || 520
+                        root.updateSettings({
+                          windowSize: "custom",
+                          windowHeight: Math.max(340, curH - 40)
+                        })
+                      }
+                    }
+                  }
+
+                  Rectangle {
+                    height: Style.space(24)
+                    width: Style.space(26)
+                    radius: root.cornerRadius
+                    color: hPlusMouse.containsMouse ? Util.alpha(root.foreground, 0.12) : Util.alpha(root.foreground, 0.05)
+                    border.color: Util.alpha(root.border, 0.25)
+                    border.width: 1
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "+"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.bold: true
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    MouseArea {
+                      id: hPlusMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var curH = (root.settings && root.settings.windowHeight) || 520
+                        root.updateSettings({
+                          windowSize: "custom",
+                          windowHeight: Math.min(1200, curH + 40)
+                        })
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              width: parent.width
+              height: 1
+              color: Util.alpha(root.border, 0.15)
+            }
+
+            // 2. Maximum Savings / History Capacity
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                text: "Maximum Saved Entries (History Capacity)"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                text: "Maximum number of clipboard history items to keep on disk. Oldest unstarred entries are evicted first."
+                color: Util.alpha(root.foreground, 0.65)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.Wrap
+                width: parent.width
+              }
+
+              Row {
+                spacing: Style.space(6)
+                Repeater {
+                  model: [
+                    { val: 50, label: "50 entries" },
+                    { val: 100, label: "100 entries" },
+                    { val: 300, label: "300 (Default)" },
+                    { val: 500, label: "500 entries" },
+                    { val: 1000, label: "1000 entries" }
+                  ]
+
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool isSelected: (root.settings.maxHistoryEntries || 300) === modelData.val
+                    height: Style.space(26)
+                    width: maxEntriesText.implicitWidth + Style.space(16)
+                    radius: root.cornerRadius
+                    color: isSelected ? root.selectedBackground : (maxEntriesMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                    border.color: isSelected ? Color.accent : (maxEntriesMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+                    border.width: 1
+
+                    Text {
+                      id: maxEntriesText
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: isSelected ? (root.selectedText || Color.accent) : (maxEntriesMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: isSelected
+                    }
+
+                    MouseArea {
+                      id: maxEntriesMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.updateSetting("maxHistoryEntries", modelData.val)
+                    }
+                  }
+                }
+              }
+
+              Text {
+                text: "Total History Store Size Cap"
+                color: Util.alpha(root.foreground, 0.8)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Row {
+                spacing: Style.space(6)
+                Repeater {
+                  model: [
+                    { val: 1, label: "1 MB (Default)" },
+                    { val: 2, label: "2 MB" },
+                    { val: 5, label: "5 MB" },
+                    { val: 10, label: "10 MB" }
+                  ]
+
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool isSelected: (root.settings.maxTotalHistoryMB || 1) === modelData.val
+                    height: Style.space(26)
+                    width: maxMBText.implicitWidth + Style.space(16)
+                    radius: root.cornerRadius
+                    color: isSelected ? root.selectedBackground : (maxMBMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                    border.color: isSelected ? Color.accent : (maxMBMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+                    border.width: 1
+
+                    Text {
+                      id: maxMBText
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: isSelected ? (root.selectedText || Color.accent) : (maxMBMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: isSelected
+                    }
+
+                    MouseArea {
+                      id: maxMBMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.updateSetting("maxTotalHistoryMB", modelData.val)
+                    }
+                  }
+                }
+              }
+
+              Text {
+                text: "Image Cache Disk Cap"
+                color: Util.alpha(root.foreground, 0.8)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Row {
+                spacing: Style.space(6)
+                Repeater {
+                  model: [
+                    { val: 16, label: "16 MB" },
+                    { val: 32, label: "32 MB (Default)" },
+                    { val: 64, label: "64 MB" },
+                    { val: 128, label: "128 MB" }
+                  ]
+
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool isSelected: (root.settings.maxImageStoreMB || 32) === modelData.val
+                    height: Style.space(26)
+                    width: maxImgText.implicitWidth + Style.space(16)
+                    radius: root.cornerRadius
+                    color: isSelected ? root.selectedBackground : (maxImgMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                    border.color: isSelected ? Color.accent : (maxImgMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+                    border.width: 1
+
+                    Text {
+                      id: maxImgText
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: isSelected ? (root.selectedText || Color.accent) : (maxImgMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: isSelected
+                    }
+
+                    MouseArea {
+                      id: maxImgMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.updateSetting("maxImageStoreMB", modelData.val)
+                    }
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              width: parent.width
+              height: 1
+              color: Util.alpha(root.border, 0.15)
+            }
+
+            // 2. Retention & Auto-Purge Policy
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                text: "Auto-Purge & Retention Policy"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                text: "Automatically delete unstarred items older than a set time. Starred (★) favorites are permanently protected."
+                color: Util.alpha(root.foreground, 0.65)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.Wrap
+                width: parent.width
+              }
+
+              Row {
+                spacing: Style.space(6)
+                Repeater {
+                  model: [
+                    { val: 0, label: "Keep Forever (Default)" },
+                    { val: 1, label: "24 Hours" },
+                    { val: 7, label: "7 Days" },
+                    { val: 14, label: "14 Days" },
+                    { val: 30, label: "30 Days" },
+                    { val: 90, label: "90 Days" }
+                  ]
+
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool isSelected: (root.settings.retentionDays || 0) === modelData.val
+                    height: Style.space(26)
+                    width: retentionText.implicitWidth + Style.space(16)
+                    radius: root.cornerRadius
+                    color: isSelected ? root.selectedBackground : (retentionMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                    border.color: isSelected ? Color.accent : (retentionMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+                    border.width: 1
+
+                    Text {
+                      id: retentionText
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: isSelected ? (root.selectedText || Color.accent) : (retentionMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: isSelected
+                    }
+
+                    MouseArea {
+                      id: retentionMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.updateSetting("retentionDays", modelData.val)
+                    }
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              width: parent.width
+              height: 1
+              color: Util.alpha(root.border, 0.15)
+            }
+
+            // 3. Sensitive Data Masking
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                text: "Sensitive Data Privacy Masking"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                text: "Automatically detect and mask API keys, JWT tokens, and passwords in the list view (e.g. sk-••••••1234)."
+                color: Util.alpha(root.foreground, 0.65)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.Wrap
+                width: parent.width
+              }
+
+              Row {
+                spacing: Style.space(6)
+
+                Rectangle {
+                  readonly property bool isMasking: root.settings.maskSensitiveText !== false
+                  height: Style.space(26)
+                  width: maskOnText.implicitWidth + Style.space(16)
+                  radius: root.cornerRadius
+                  color: isMasking ? root.selectedBackground : (maskOnMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                  border.color: isMasking ? Color.accent : Util.alpha(root.border, 0.2)
+                  border.width: 1
+
+                  Text {
+                    id: maskOnText
+                    anchors.centerIn: parent
+                    text: "🔒 Mask Secrets (Enabled)"
+                    color: parent.isMasking ? (root.selectedText || Color.accent) : Util.alpha(root.foreground, 0.75)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: parent.isMasking
+                  }
+
+                  MouseArea {
+                    id: maskOnMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.updateSetting("maskSensitiveText", true)
+                  }
+                }
+
+                Rectangle {
+                  readonly property bool isMasking: root.settings.maskSensitiveText !== false
+                  height: Style.space(26)
+                  width: maskOffText.implicitWidth + Style.space(16)
+                  radius: root.cornerRadius
+                  color: !isMasking ? root.selectedBackground : (maskOffMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                  border.color: !isMasking ? Color.accent : Util.alpha(root.border, 0.2)
+                  border.width: 1
+
+                  Text {
+                    id: maskOffText
+                    anchors.centerIn: parent
+                    text: "🔓 Show Plainly (Disabled)"
+                    color: !parent.isMasking ? (root.selectedText || Color.accent) : Util.alpha(root.foreground, 0.75)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: !parent.isMasking
+                  }
+
+                  MouseArea {
+                    id: maskOffMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.updateSetting("maskSensitiveText", false)
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              width: parent.width
+              height: 1
+              color: Util.alpha(root.border, 0.15)
+            }
+
+            // 4. Paste on Click
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                text: "Click Behavior"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                text: "Choose whether clicking an item only copies it to clipboard or immediately pastes it into the active application."
+                color: Util.alpha(root.foreground, 0.65)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.Wrap
+                width: parent.width
+              }
+
+              Row {
+                spacing: Style.space(6)
+
+                Rectangle {
+                  readonly property bool isPasteOnClick: Boolean(root.settings.pasteOnClick)
+                  height: Style.space(26)
+                  width: copyOnlyText.implicitWidth + Style.space(16)
+                  radius: root.cornerRadius
+                  color: !isPasteOnClick ? root.selectedBackground : (copyOnlyMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                  border.color: !isPasteOnClick ? Color.accent : Util.alpha(root.border, 0.2)
+                  border.width: 1
+
+                  Text {
+                    id: copyOnlyText
+                    anchors.centerIn: parent
+                    text: "Copy to Clipboard Only (Default)"
+                    color: !parent.isPasteOnClick ? (root.selectedText || Color.accent) : Util.alpha(root.foreground, 0.75)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: !parent.isPasteOnClick
+                  }
+
+                  MouseArea {
+                    id: copyOnlyMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.updateSetting("pasteOnClick", false)
+                  }
+                }
+
+                Rectangle {
+                  readonly property bool isPasteOnClick: Boolean(root.settings.pasteOnClick)
+                  height: Style.space(26)
+                  width: autoPasteText.implicitWidth + Style.space(16)
+                  radius: root.cornerRadius
+                  color: isPasteOnClick ? root.selectedBackground : (autoPasteMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                  border.color: isPasteOnClick ? Color.accent : Util.alpha(root.border, 0.2)
+                  border.width: 1
+
+                  Text {
+                    id: autoPasteText
+                    anchors.centerIn: parent
+                    text: "Automatically Paste on Click"
+                    color: parent.isPasteOnClick ? (root.selectedText || Color.accent) : Util.alpha(root.foreground, 0.75)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: parent.isPasteOnClick
+                  }
+
+                  MouseArea {
+                    id: autoPasteMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.updateSetting("pasteOnClick", true)
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              width: parent.width
+              height: 1
+              color: Util.alpha(root.border, 0.15)
+            }
+
+            // 6. Placement
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                text: "Overlay Placement"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                text: "Position on screen where the clipboard overlay is summoned."
+                color: Util.alpha(root.foreground, 0.65)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.Wrap
+                width: parent.width
+              }
+
+              Row {
+                spacing: Style.space(6)
+                Repeater {
+                  model: [
+                    { id: "top-right", label: "Top-Right (Default)" },
+                    { id: "top-center", label: "Top-Center" },
+                    { id: "top-left", label: "Top-Left" },
+                    { id: "center", label: "Center" }
+                  ]
+
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool isSelected: (root.settings.position || "top-right") === modelData.id
+                    height: Style.space(26)
+                    width: posText.implicitWidth + Style.space(16)
+                    radius: root.cornerRadius
+                    color: isSelected ? root.selectedBackground : (posMouse.containsMouse ? Util.alpha(root.foreground, 0.08) : "transparent")
+                    border.color: isSelected ? Color.accent : (posMouse.containsMouse ? Util.alpha(root.foreground, 0.25) : Util.alpha(root.border, 0.2))
+                    border.width: 1
+
+                    Text {
+                      id: posText
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: isSelected ? (root.selectedText || Color.accent) : (posMouse.containsMouse ? root.foreground : Util.alpha(root.foreground, 0.75))
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: isSelected
+                    }
+
+                    MouseArea {
+                      id: posMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.updateSetting("position", modelData.id)
+                    }
+                  }
+                }
+              }
             }
           }
         }

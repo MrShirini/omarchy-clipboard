@@ -1,6 +1,6 @@
 {
   "name": "omarchy-clipboard",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Favorites-enabled fork of omarchy.clipboard",
   "private": true,
   "scripts": {

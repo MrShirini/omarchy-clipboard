@@ -3,14 +3,30 @@ var DEFAULT_SETTINGS = {
   customOffset: { x: 0, y: 0 },
   shortcuts: {
     favorite: "Alt+F",
-    toggleFavoritesView: "Tab"
+    toggleFavoritesView: "Tab",
+    togglePause: "Alt+P",
+    openSettings: "Ctrl+,"
   },
   defaultTagSet: ["Code", "Links", "Tokens", "Todo"],
   maskSensitiveText: true,
-  pasteOnClick: false
+  pasteOnClick: false,
+  maxHistoryEntries: 300,
+  retentionDays: 0,
+  maxTotalHistoryMB: 1,
+  maxImageStoreMB: 32,
+  windowSize: "medium",
+  windowWidth: 720,
+  windowHeight: 520
 }
 
 var ALLOWED_POSITIONS = ["top-right", "top-center", "top-left", "center"]
+var ALLOWED_WINDOW_SIZES = ["compact", "medium", "large", "expanded", "custom"]
+var WINDOW_SIZE_PRESETS = {
+  compact: { width: 600, height: 420 },
+  medium: { width: 720, height: 520 },
+  large: { width: 880, height: 620 },
+  expanded: { width: 1040, height: 720 }
+}
 
 function parseSettings(raw) {
   var str = String(raw || "").trim()
@@ -57,13 +73,55 @@ function parseSettings(raw) {
     var maskSensitive = parsed.maskSensitiveText !== false
     var pasteOnClick = Boolean(parsed.pasteOnClick)
 
+    var maxEntries = Number(parsed.maxHistoryEntries)
+    if (isNaN(maxEntries) || maxEntries < 10) {
+      maxEntries = DEFAULT_SETTINGS.maxHistoryEntries
+    }
+
+    var retention = Number(parsed.retentionDays)
+    if (isNaN(retention) || retention < 0) {
+      retention = DEFAULT_SETTINGS.retentionDays
+    }
+
+    var maxTotalMB = Number(parsed.maxTotalHistoryMB)
+    if (isNaN(maxTotalMB) || maxTotalMB <= 0) {
+      maxTotalMB = DEFAULT_SETTINGS.maxTotalHistoryMB
+    }
+
+    var maxImageMB = Number(parsed.maxImageStoreMB)
+    if (isNaN(maxImageMB) || maxImageMB <= 0) {
+      maxImageMB = DEFAULT_SETTINGS.maxImageStoreMB
+    }
+
+    var winSize = String(parsed.windowSize || "").toLowerCase()
+    if (ALLOWED_WINDOW_SIZES.indexOf(winSize) < 0) {
+      winSize = DEFAULT_SETTINGS.windowSize
+    }
+
+    var winWidth = Number(parsed.windowWidth)
+    if (isNaN(winWidth) || winWidth < 400 || winWidth > 2560) {
+      winWidth = (WINDOW_SIZE_PRESETS[winSize] && WINDOW_SIZE_PRESETS[winSize].width) || DEFAULT_SETTINGS.windowWidth
+    }
+
+    var winHeight = Number(parsed.windowHeight)
+    if (isNaN(winHeight) || winHeight < 300 || winHeight > 1600) {
+      winHeight = (WINDOW_SIZE_PRESETS[winSize] && WINDOW_SIZE_PRESETS[winSize].height) || DEFAULT_SETTINGS.windowHeight
+    }
+
     return {
       position: pos,
       customOffset: offset,
       shortcuts: shortcuts,
       defaultTagSet: tags,
       maskSensitiveText: maskSensitive,
-      pasteOnClick: pasteOnClick
+      pasteOnClick: pasteOnClick,
+      maxHistoryEntries: maxEntries,
+      retentionDays: retention,
+      maxTotalHistoryMB: maxTotalMB,
+      maxImageStoreMB: maxImageMB,
+      windowSize: winSize,
+      windowWidth: winWidth,
+      windowHeight: winHeight
     }
   } catch (e) {
     return Object.assign({}, DEFAULT_SETTINGS)
@@ -149,6 +207,8 @@ if (typeof module !== "undefined") {
   module.exports = {
     DEFAULT_SETTINGS: DEFAULT_SETTINGS,
     ALLOWED_POSITIONS: ALLOWED_POSITIONS,
+    ALLOWED_WINDOW_SIZES: ALLOWED_WINDOW_SIZES,
+    WINDOW_SIZE_PRESETS: WINDOW_SIZE_PRESETS,
     parseSettings: parseSettings,
     parseShortcut: parseShortcut,
     matchesShortcut: matchesShortcut
